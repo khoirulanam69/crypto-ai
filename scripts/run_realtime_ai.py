@@ -1,5 +1,6 @@
-# scripts/run_realtime_ai.py
-import os
+import sys, os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import time
 from dotenv import load_dotenv
 from executor.order_manager import OrderManager
