@@ -1,0 +1,7 @@
+default:
+  symbol: BTC/USDT
+  timeframe: 1h
+  initial_cash: 10000
+  max_position_pct: 0.02
+  slippage_pct: 0.001
+  exchange: binance
