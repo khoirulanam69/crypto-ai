@@ -6,3 +6,4 @@ gymnasium
 python-dotenv
 requests
 torch
+tensorboard
