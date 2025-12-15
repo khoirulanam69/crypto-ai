@@ -26,7 +26,7 @@ class AIDecisionEngine:
         )
 
         self.experience_path = experience_path or os.getenv(
-            "EXPERIENCE_PATH", f"history/experience_{symbol.replace('/', '_')}.csv"
+            "EXPERIENCE_PATH", f"data/experience_{symbol.replace('/', '_')}.csv"
         )
 
         self.logger = ExperienceLogger(self.experience_path)
