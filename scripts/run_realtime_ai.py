@@ -1,43 +1,113 @@
-import sys, os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 import time
-from dotenv import load_dotenv
+import traceback
+from datetime import datetime
+
 from executor.order_manager import OrderManager
-from ai.infer import decide_and_execute
-import pandas as pd
+from ai.infer import AIDecisionEngine
 
-load_dotenv()
-SYMBOL = os.getenv("SYMBOL", "BTC/USDT")
-WINDOW = int(os.getenv("AI_WINDOW", "50"))
-SLEEP = float(os.getenv("LOOP_INTERVAL", "10"))
-LIVE_BUFFER = os.getenv("LIVE_BUFFER", "data/live_buffer.csv")
 
-om = OrderManager()  # uses paper mode by default from env
+SYMBOL = "BTC/USDT"
+TIMEFRAME = "1m"
+CANDLE_LIMIT = 100
 
-def fetch_recent_ohlcv_df(symbol=SYMBOL, window=WINDOW):
-    # Use OrderManager.fetch_ohlcv to get recent candles
-    ohlcv = om.fetch_ohlcv(symbol, timeframe='1m', limit=window)
-    # ohlcv is list of [ts, open, high, low, close, volume]
-    import pandas as pd
-    cols = ['timestamp','open','high','low','close','volume']
-    df = pd.DataFrame(ohlcv, columns=cols)
-    return df
+SLEEP_SECONDS = 5      # polling interval (AMAN utk Binance)
+MAX_RETRIES = 5
 
-print("Starting realtime AI loop (paper=%s)..." % os.getenv("MODE", "paper"))
-while True:
-    try:
-        df_window = fetch_recent_ohlcv_df()
-        if df_window is None or df_window.shape[0] < WINDOW:
-            print("Not enough data, waiting...")
-            time.sleep(SLEEP)
-            continue
 
-        res = decide_and_execute(om, df_window, live_buffer_path=LIVE_BUFFER)
-        print("AI decided:", res.get("action"), "note:", res.get("note"))
-    except KeyboardInterrupt:
-        print("Stopping by user")
-        break
-    except Exception as e:
-        print("Loop error:", e)
-    time.sleep(SLEEP)
+def log(msg):
+    ts = datetime.utcnow().isoformat()
+    print(f"[{ts}] {msg}")
+
+
+def main():
+    log("Starting realtime AI trading bot...")
+
+    order_manager = OrderManager()
+    ai_engine = AIDecisionEngine(symbol=SYMBOL)
+
+    last_candle_ts = None
+    consecutive_errors = 0
+
+    while True:
+        try:
+            # ======================================
+            # FETCH MARKET DATA
+            # ======================================
+            candles = order_manager.fetch_ohlcv(
+                SYMBOL,
+                timeframe=TIMEFRAME,
+                limit=CANDLE_LIMIT,
+            )
+
+            if not candles or len(candles) < 50:
+                log("Not enough candle data, waiting...")
+                time.sleep(SLEEP_SECONDS)
+                continue
+
+            # OHLCV format:
+            # [timestamp, open, high, low, close, volume]
+            latest = candles[-1]
+            candle_ts = latest[0]
+
+            # ======================================
+            # PREVENT DOUBLE PROCESSING
+            # ======================================
+            if last_candle_ts == candle_ts:
+                time.sleep(SLEEP_SECONDS)
+                continue
+
+            last_candle_ts = candle_ts
+
+            # ======================================
+            # AI DECISION
+            # ======================================
+            decision = ai_engine.decide(candles)
+
+            if not decision:
+                log("AI returned no decision")
+                continue
+
+            action = decision["action"]
+            confidence = decision.get("confidence", 0)
+
+            log(f"AI decision: {action} (confidence={confidence:.2f})")
+
+            # ======================================
+            # EXECUTION
+            # ======================================
+            if action == "BUY":
+                order_manager.create_market_buy(
+                    SYMBOL,
+                    decision["quote_amount"],
+                )
+
+            elif action == "SELL":
+                order_manager.create_market_sell(
+                    SYMBOL,
+                    decision["base_amount"],
+                )
+
+            else:
+                log("HOLD")
+
+            consecutive_errors = 0
+
+        except KeyboardInterrupt:
+            log("Bot stopped manually")
+            break
+
+        except Exception as e:
+            consecutive_errors += 1
+            log(f"ERROR: {e}")
+            traceback.print_exc()
+
+            if consecutive_errors >= MAX_RETRIES:
+                log("Too many errors, cooling down 60s")
+                time.sleep(60)
+                consecutive_errors = 0
+
+        time.sleep(SLEEP_SECONDS)
+
+
+if __name__ == "__main__":
+    main()

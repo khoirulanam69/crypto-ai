@@ -4,7 +4,9 @@ import pandas as pd
 from stable_baselines3 import PPO
 from ai.envs.exchange_env import ExchangeEnv
 from executor.order_manager import OrderManager
+from ai.experience_logger import ExperienceLogger
 
+logger = ExperienceLogger()
 MODEL = os.getenv("MODEL", "models/ppo_baseline.zip")
 SYMBOL = os.getenv("SYMBOL", "BTC/USDT")
 WINDOW = int(os.getenv("AI_WINDOW", "50"))
@@ -28,41 +30,36 @@ def predict_action_from_ohlcv(df_window):
     action, _ = model.predict(obs, deterministic=True)
     return int(action)
 
-def decide_and_execute(order_manager: OrderManager, recent_ohlcv_df: pd.DataFrame, live_buffer_path: str = "data/live_buffer.csv"):
+def decide_and_execute(order_manager, env, obs):
     """
-    recent_ohlcv_df: dataframe with last WINDOW rows (timestamp, open, high, low, close, volume)
-    Executes order via order_manager based on action prediction.
-    Also append experience to live_buffer (for online fine-tune).
+    env: ExchangeEnv live instance
+    obs: current observation
     """
-    action = predict_action_from_ohlcv(recent_ohlcv_df)
-    price = float(recent_ohlcv_df.iloc[-1]['close'])
-    note = {}
-    result = None
+
+    model = load_model()
+    action, _ = model.predict(obs, deterministic=False)
+
+    next_obs, reward, done, _, info = env.step(int(action))
+
+    # EKSEKUSI REAL
+    price = info["networth"]
 
     if action == 1:
-        qty_quote = float(os.getenv("TRADE_AMOUNT_QUOTE", "10"))
-        result = order_manager.create_market_buy(SYMBOL, qty_quote)
-        note = {"action": "buy", "quote": qty_quote}
+        order_manager.create_market_buy()
     elif action == 2:
-        qty_base = float(os.getenv("TRADE_AMOUNT_BASE", "0.0005"))
-        result = order_manager.create_market_sell(SYMBOL, qty_base)
-        note = {"action": "sell", "base": qty_base}
-    else:
-        note = {"action": "hold"}
+        order_manager.create_market_buy()
+    elif action == 3:
+        order_manager.create_market_sell()
+    elif action == 4:
+        order_manager.create_market_sell()
 
-    # Append to live buffer: timestamp, action, price, note (simple CSV)
-    try:
-        import csv, time
-        ts = int(time.time() * 1000)
-        row = [ts, action, price, str(note)]
-        os.makedirs(os.path.dirname(live_buffer_path) or ".", exist_ok=True)
-        write_header = not os.path.exists(live_buffer_path)
-        with open(live_buffer_path, "a", newline="") as f:
-            writer = csv.writer(f)
-            if write_header:
-                writer.writerow(["ts", "action", "price", "meta"])
-            writer.writerow(row)
-    except Exception as e:
-        print("Append live buffer failed:", e)
+    # LOG EXPERIENCE
+    logger.log(
+        obs=obs,
+        action=int(action),
+        reward=float(reward),
+        next_obs=next_obs,
+        done=done
+    )
 
-    return {"action": action, "result": result, "note": note}
+    return next_obs, done, info

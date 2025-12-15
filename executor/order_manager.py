@@ -1,79 +1,57 @@
 import ccxt
 import os
 import time
-import logging
-import requests
-import urllib3
 from dotenv import load_dotenv
-
 from utils.dns_resolver import DNSResolver
 from utils.proxy_manager import ProxyManager
 
 load_dotenv()
 
-# ===================================================================
-#   LOGGING
-# ===================================================================
-logger = logging.getLogger("OrderManager")
-logger.setLevel(logging.INFO)
-handler = logging.StreamHandler()
-handler.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s %(name)s: %(message)s"))
-logger.addHandler(handler)
-
-# ===================================================================
-#   CUSTOM SSL ADAPTER FOR FORCED SNI + HOST HEADER
-# ===================================================================
-
-class HostHeaderSSLAdapter(requests.adapters.HTTPAdapter):
-    """
-    Force requests to connect to IP but keep SNI & Host header to the original domain.
-    This is REQUIRED for Binance to accept the request while bypassing DNS.
-    """
-    def __init__(self, override_ip, host, **kwargs):
-        self.override_ip = override_ip
-        self.host = host
-        super().__init__(**kwargs)
-
-    def get_connection(self, url, proxies=None):
-        # Replace host with IP, but keep https://
-        new_url = url.replace(self.host, self.override_ip)
-        return super().get_connection(new_url, proxies)
-
-    def add_headers(self, request, **kwargs):
-        # Binance requires correct Host header
-        request.headers['Host'] = self.host
-        return super().add_headers(request, **kwargs)
-
-    def init_poolmanager(self, *args, **kwargs):
-        # Enforce SNI
-        kwargs['server_hostname'] = self.host
-        return super().init_poolmanager(*args, **kwargs)
-
-# ===================================================================
-#   ORDER MANAGER FINAL
-# ===================================================================
 
 class OrderManager:
-    def __init__(self, api_key=None, secret=None, testnet=False):
-        self.api_key = api_key or os.getenv("BINANCE_API_KEY")
-        self.secret = secret or os.getenv("BINANCE_API_SECRET")
+    """
+    Central execution layer for exchange interaction.
+    Responsible for:
+    - Exchange initialization
+    - Time sync
+    - Proxy handling
+    - DNS fallback
+    - Safe request retry
+    """
+
+    def __init__(self, testnet: bool = False):
         self.testnet = testnet
-        
-        # Load DNS resolver
+        self.mode = os.getenv("MODE", "paper")
+
+        # ======================
+        # API KEYS
+        # ======================
+        api_key = os.getenv("BINANCE_API_KEY")
+        secret = os.getenv("BINANCE_API_SECRET")
+
+        if not api_key or not secret:
+            raise RuntimeError("BINANCE_API_KEY / BINANCE_API_SECRET not set")
+
+        # ======================
+        # DNS + PROXY
+        # ======================
         self.resolver = DNSResolver(
-            fallback_ips=["18.162.165.240", "18.181.3.53"]
+            fallback_ips=[
+                "18.162.165.240",
+                "18.181.3.53",
+            ]
         )
 
-        # Load proxies from .env
-        proxies_env = os.getenv("PROXIES", "")
-        proxy_list = [p.strip() for p in proxies_env.split(",") if p.strip()]
+        proxies = os.getenv("PROXIES", "")
+        proxy_list = [p.strip() for p in proxies.split(",") if p.strip()]
         self.proxy_manager = ProxyManager(proxy_list)
-        logger.info(f"Loaded {len(proxy_list)} proxies")
 
-        # Init exchange
+        # ======================
+        # EXCHANGE INIT
+        # ======================
         self.exchange = ccxt.binance({
-            "apiKey": self.api_key,
-            "secret": self.secret,
+            "apiKey": api_key,
+            "secret": secret,
             "enableRateLimit": True,
             "timeout": 20000,
             "options": {
@@ -82,139 +60,127 @@ class OrderManager:
             },
         })
 
-        # Apply working proxy to ccxt session
-        self._apply_proxy()
+        # ======================
+        # TIME SYNC (CRITICAL)
+        # ======================
+        try:
+            self.exchange.load_time_difference()
+        except Exception as e:
+            print("[OrderManager] time sync failed:", e)
 
-        # Force SNI + Host HEADER using session adapter
-        self._apply_dns_override()
-
-    # ===================================================================
-    #   APPLY PROXY
-    # ===================================================================
-
-    def _apply_proxy(self):
+        # ======================
+        # APPLY PROXY (IF ANY)
+        # ======================
         try:
             proxy = self.proxy_manager.get_working_proxy()
             if proxy and hasattr(self.exchange, "session"):
-                logger.info(f"[proxy] Using {proxy}")
-                self.exchange.session.proxies.update(
-                    {"http": proxy, "https": proxy}
-                )
+                self.exchange.session.proxies.update({
+                    "http": proxy,
+                    "https": proxy,
+                })
+                print(f"[proxy] {proxy}")
             else:
-                logger.info("[proxy] none (direct)")
-        except:
-            logger.warning("Failed applying proxy")
+                print("[proxy] none (direct)")
+        except Exception as e:
+            print("[proxy] error:", e)
 
-    # ===================================================================
-    #   APPLY DNS OVERRIDE (WITHOUT BREAKING SNI)
-    # ===================================================================
+        # ======================
+        # DNS FALLBACK → IP
+        # ======================
+        self._apply_dns_override()
 
+    # ==========================================================
+    # DNS OVERRIDE
+    # ==========================================================
     def _apply_dns_override(self):
-        host = "api.binance.com"
-        resolved_ip = self.resolver.resolve(host)
+        try:
+            host = "api.binance.com"
+            ip = self.resolver.resolve(host)
 
-        if not resolved_ip:
-            logger.warning("DNS override failed. Using normal domain.")
-            return
-        
-        logger.info(f"Resolved {host} -> {resolved_ip} (applying SNI adapter)")
+            if not ip:
+                return
 
-        if hasattr(self.exchange, "session"):
-            adapter = HostHeaderSSLAdapter(resolved_ip, host)
-            self.exchange.session.mount("https://api.binance.com", adapter)
+            for k, v in self.exchange.urls.items():
+                if isinstance(v, str) and host in v:
+                    self.exchange.urls[k] = v.replace(host, ip)
+                elif isinstance(v, dict):
+                    for kk, vv in v.items():
+                        if isinstance(vv, str) and host in vv:
+                            self.exchange.urls[k][kk] = vv.replace(host, ip)
 
-    # ===================================================================
-    #   SAFE REQUEST (RETRY + PROXY SWITCH + BACKOFF)
-    # ===================================================================
+            if not hasattr(self.exchange, "headers") or self.exchange.headers is None:
+                self.exchange.headers = {}
 
-    def _safe_request(self, func, *args, retries=4, **kwargs):
-        delay = 1
-        last_err = None
+            self.exchange.headers["Host"] = host
+
+            if hasattr(self.exchange, "session"):
+                self.exchange.session.headers.update({"Host": host})
+
+        except Exception as e:
+            print("[DNS] override failed:", e)
+
+    # ==========================================================
+    # SAFE REQUEST (RETRY + PROXY ROTATION)
+    # ==========================================================
+    def _safe_request(self, func, *args, retries: int = 3, backoff: int = 2, **kwargs):
+        last_exc = None
 
         for attempt in range(1, retries + 1):
             try:
                 return func(*args, **kwargs)
 
             except Exception as e:
-                last_err = e
-                logger.warning(
-                    f"Safe request attempt {attempt}/{retries} failed: {e}"
-                )
+                last_exc = e
+                print(f"[retry {attempt}/{retries}] {e}")
 
-                # Switch proxy
+                # rotate proxy
                 try:
-                    self._apply_proxy()
+                    proxy = self.proxy_manager.get_working_proxy()
+                    if proxy and hasattr(self.exchange, "session"):
+                        self.exchange.session.proxies.update({
+                            "http": proxy,
+                            "https": proxy,
+                        })
+                        print(f"[proxy switch] {proxy}")
                 except:
                     pass
 
-                logger.info(f"Sleeping {delay:.1f}s before retry")
-                time.sleep(delay)
-                delay *= 2
+                time.sleep(backoff * attempt)
 
-        raise last_err
+        raise last_exc
 
-    # ===================================================================
-    #   MARKET DATA
-    # ===================================================================
-
-    def fetch_ohlcv(self, symbol, timeframe='1m', limit=100):
+    # ==========================================================
+    # MARKET DATA
+    # ==========================================================
+    def fetch_ohlcv(self, symbol, timeframe="1m", limit=100):
         return self._safe_request(
             self.exchange.fetch_ohlcv,
             symbol,
             timeframe=timeframe,
-            limit=limit
+            limit=limit,
         )
 
-    def fetch_ticker(self, symbol):
-        return self._safe_request(
-            self.exchange.fetch_ticker,
-            symbol
-        )
+    # ==========================================================
+    # ORDERS
+    # ==========================================================
+    def create_market_buy(self, symbol, quote_amount):
+        if self.mode == "paper":
+            print(f"[PAPER BUY] {symbol} quote={quote_amount}")
+            return None
 
-    # ===================================================================
-    #   TRADING FUNCTIONS
-    # ===================================================================
-
-    def create_limit_buy(self, symbol, price, amount):
-        logger.info(f"[TRADE] BUY {symbol} @ {price} amount={amount}")
-        return self._safe_request(
-            self.exchange.create_limit_buy_order,
-            symbol, amount, price
-        )
-
-    def create_limit_sell(self, symbol, price, amount):
-        logger.info(f"[TRADE] SELL {symbol} @ {price} amount={amount}")
-        return self._safe_request(
-            self.exchange.create_limit_sell_order,
-            symbol, amount, price
-        )
-
-    def create_market_buy(self, symbol, amount):
-        logger.info(f"[TRADE] MARKET BUY {symbol} amount={amount}")
         return self._safe_request(
             self.exchange.create_market_buy_order,
-            symbol, amount
+            symbol,
+            quote_amount,
         )
 
-    def create_market_sell(self, symbol, amount):
-        logger.info(f"[TRADE] MARKET SELL {symbol} amount={amount}")
+    def create_market_sell(self, symbol, base_amount):
+        if self.mode == "paper":
+            print(f"[PAPER SELL] {symbol} base={base_amount}")
+            return None
+
         return self._safe_request(
             self.exchange.create_market_sell_order,
-            symbol, amount
+            symbol,
+            base_amount,
         )
-    
-    # ===================================================================
-    #   SIMPLE ALIAS METHODS (for compatibility with old scripts)
-    # ===================================================================
-
-    def market_buy(self, symbol, amount):
-        """
-        Alias for create_market_buy, because run_realtime.py calls market_buy()
-        """
-        return self.create_market_buy(symbol, amount)
-
-    def market_sell(self, symbol, amount):
-        """
-        Alias for create_market_sell
-        """
-        return self.create_market_sell(symbol, amount)
