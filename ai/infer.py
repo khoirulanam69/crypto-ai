@@ -25,9 +25,8 @@ class AIDecisionEngine:
             "MODEL", "models/ppo_live.zip"
         )
 
-        self.experience_path = experience_path or os.getenv(
-            "EXPERIENCE_PATH", f"data/experience_{symbol.replace('/', '_')}.csv"
-        )
+        BASE_DIR = os.path.expanduser("~/.crypto-ai")
+        self.experience_path = os.path.join(BASE_DIR, "experience.jsonl")
 
         self.logger = ExperienceLogger(self.experience_path)
 
