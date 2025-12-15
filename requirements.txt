@@ -1,14 +1,8 @@
 ccxt
-python-binance
 pandas
 numpy
-ta
-backtrader
 stable-baselines3
 gymnasium
-sqlalchemy
-psycopg2-binary
-uvicorn
-fastapi
 python-dotenv
 requests
+torch
