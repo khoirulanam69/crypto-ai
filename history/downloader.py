@@ -15,7 +15,7 @@ def fetch_ohlcv(symbol='BTC/USDT', timeframe='1h', limit=1000, since=None):
 
 if __name__ == '__main__':
     df = fetch_ohlcv('BTC/USDT','1h',limit=500)
-    out = 'data/btc_usdt_1h.csv'
+    out = 'data/history_BTCUSDT_1h.csv'
     os.makedirs('data', exist_ok=True)
     df.to_csv(out)
     print(f"Saved {len(df)} rows to {out}")
