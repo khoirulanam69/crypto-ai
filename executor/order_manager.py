@@ -84,41 +84,6 @@ class OrderManager:
         except Exception as e:
             print("[proxy] error:", e)
 
-        # ======================
-        # DNS FALLBACK → IP
-        # ======================
-        self._apply_dns_override()
-
-    # ==========================================================
-    # DNS OVERRIDE
-    # ==========================================================
-    def _apply_dns_override(self):
-        try:
-            host = "api.binance.com"
-            ip = self.resolver.resolve(host)
-
-            if not ip:
-                return
-
-            for k, v in self.exchange.urls.items():
-                if isinstance(v, str) and host in v:
-                    self.exchange.urls[k] = v.replace(host, ip)
-                elif isinstance(v, dict):
-                    for kk, vv in v.items():
-                        if isinstance(vv, str) and host in vv:
-                            self.exchange.urls[k][kk] = vv.replace(host, ip)
-
-            if not hasattr(self.exchange, "headers") or self.exchange.headers is None:
-                self.exchange.headers = {}
-
-            self.exchange.headers["Host"] = host
-
-            if hasattr(self.exchange, "session"):
-                self.exchange.session.headers.update({"Host": host})
-
-        except Exception as e:
-            print("[DNS] override failed:", e)
-
     # ==========================================================
     # SAFE REQUEST (RETRY + PROXY ROTATION)
     # ==========================================================
@@ -184,3 +149,30 @@ class OrderManager:
             symbol,
             base_amount,
         )
+
+    # ========================================================
+    # FETCH EQUITY
+    # ========================================================
+
+    def get_equity(self):
+        """
+        Return total equity in quote currency (USDT)
+        """
+        balance = self.exchange.fetch_balance()
+
+        total = 0.0
+        for asset, data in balance['total'].items():
+            if data is None or data <= 0:
+                continue
+
+            if asset == "USDT":
+                total += float(data)
+            else:
+                symbol = f"{asset}/USDT"
+                try:
+                    price = self.exchange.fetch_ticker(symbol)["last"]
+                    total += float(data) * price
+                except Exception:
+                    pass
+
+        return total

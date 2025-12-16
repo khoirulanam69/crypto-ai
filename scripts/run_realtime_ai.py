@@ -6,11 +6,15 @@ sys.path.append(BASE_DIR)
 
 import time
 import traceback
+import pandas as pd
 from datetime import datetime
 
 from executor.order_manager import OrderManager
 from ai.infer import AIDecisionEngine
+from risk.risk_manager import RiskManager
+from risk.indicators import ATR
 
+risk = RiskManager()
 
 SYMBOL = "BTC/USDT"
 TIMEFRAME = "1m"
@@ -67,25 +71,62 @@ def main():
             # ======================================
             # AI DECISION
             # ======================================
-            decision = ai_engine.decide(candles)
 
-            if not decision:
-                log("AI returned no decision")
+            action = ai_engine.decide(candles)
+
+            if action is None:
+                logger.warning("AI returned no decision")
                 continue
 
-            action = decision["action"]
-            confidence = decision.get("confidence", 0)
+            # ======================================
+            # RISK MANAGEMENT LAYER (WAJIB DI SINI)
+            # ======================================
 
-            log(f"AI decision: {action} (confidence={confidence:.2f})")
+            equity = order_manager.get_equity()
+            candles = order_manager.exchange.fetch_ohlcv(
+                SYMBOL, timeframe="1m", limit=100
+            )
+
+            df = pd.DataFrame(
+                candles,
+                columns=["timestamp", "open", "high", "low", "close", "volume"]
+            )
+
+            last_price = float(
+                order_manager.exchange.fetch_ticker(SYMBOL)["last"]
+            )
+
+            allowed, reason = risk.allow_trade(equity)
+            if not allowed:
+                logger.warning(f"[RISK BLOCKED] {reason}")
+                continue
+
+            price = last_price
+            atr = ATR(df).iloc[-1]
+
+            if atr is None or atr != atr:
+                logger.warning("ATR invalid, skip trade")
+                continue
+
+            stop_loss = price - atr * 1.5
+            take_profit = price + atr * 1.5 * risk.min_rr
+
+            qty = risk.position_size(equity, price, stop_loss)
+            if qty <= 0:
+                logger.warning("Position size <= 0, skip trade")
+                continue
 
             # ======================================
             # EXECUTION
             # ======================================
+
             if action == "BUY":
-                order_manager.create_market_buy(
+                order_manager.create_limit_buy(
                     SYMBOL,
-                    decision["quote_amount"],
+                    price,
+                    qty
                 )
+                risk.register_trade()
 
             elif action == "SELL":
                 order_manager.create_market_sell(
