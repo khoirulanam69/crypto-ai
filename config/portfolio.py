@@ -1,0 +1,9 @@
+SYMBOLS = [
+    "BTC/USDT",
+    "ETH/USDT",
+    "BNB/USDT",
+    "SOL/USDT"
+]
+
+TIMEFRAME = "1m"
+WINDOW_SIZE = 50
