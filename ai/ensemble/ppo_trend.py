@@ -1,15 +1,20 @@
-from stable_baselines3 import PPO
-from .base import BaseModel
 import os
+from stable_baselines3 import PPO
 
-class PPOTrend(BaseModel):
-    name = "ppo_trend"
-    weight = 1.2
-
+class PPOTrend:
     def __init__(self):
-        self.model = PPO.load(os.getenv("PPO_TREND_MODEL"))
+        model_path = os.getenv(
+            "PPO_TREND_MODEL",
+            "models/ppo_trend.zip"   # DEFAULT WAJIB
+        )
 
-    def predict(self, state):
-        action, _ = self.model.predict(state, deterministic=False)
-        confidence = 0.6
-        return int(action), confidence
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(
+                f"PPOTrend model not found: {model_path}"
+            )
+
+        self.model = PPO.load(model_path)
+
+    def decide(self, state):
+        action, _ = self.model.predict(state, deterministic=True)
+        return int(action)
