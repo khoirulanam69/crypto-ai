@@ -11,9 +11,6 @@ import os
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
-from executor.order_manager import OrderManager
-
-
 # load env
 load_dotenv()
 
@@ -21,10 +18,19 @@ load_dotenv()
 # adjust import path if different (e.g., executor.order_manager)
 from executor.order_manager import OrderManager  # your existing patched file
 from utils.proxy_manager import ProxyManager
+from ai.ensemble.aggregator import EnsembleAggregator
+from ai.ensemble.ppo_trend import PPOTrend
+from ai.ensemble.ppo_mean import PPOMean
+from ai.ensemble.lstm import LSTMPrice
+from ai.ensemble.rule import RuleBased
+from risk.risk_manager import RiskManager
+from risk.indicators import ATR
+
+risk = RiskManager()
 
 # settings
 SYMBOL = os.getenv("SYMBOL", "BTC/USDT")
-SLEEP_SECONDS = float(os.getenv("LOOP_INTERVAL", "10"))   # how often to check price
+SLEEP_SECONDS = float(os.getenv("LOOP_INTERVAL", "15"))   # how often to check price
 PAPER = os.getenv("MODE", "paper").lower() == "paper"
 DB_PATH = os.getenv("TRADES_DB", "trades.db")
 MAX_ERRORS_BEFORE_RESTART = int(os.getenv("MAX_ERRORS_BEFORE_RESTART", "10"))
@@ -76,6 +82,16 @@ def main_loop():
     proxy_mgr = ProxyManager()
     # create order manager (this should use resolver/proxy inside)
     om = OrderManager()
+    # =========================
+    # INIT AI ENSEMBLE (ONE TIME)
+    # =========================
+    ensemble = EnsembleAggregator([
+        PPOTrend(),
+        PPOMean(),
+        LSTMPrice(),
+        RuleBased()
+    ])
+
     # ensure safe_request helper exists on om
     if not hasattr(om, "_safe_request"):
         safe_print("Warning: OrderManager._safe_request not found — some requests may not retry properly.")
@@ -106,33 +122,82 @@ def main_loop():
 
             safe_print("Price:", price)
 
-            # DECISION LOGIC (simple example - replace with your AI/strategy)
-            # You can import your existing strategy and call it instead
-            # example: from strategy.my_strategy import decide; signal = decide(recent_prices)
-            # For demo: trivial example - alternate buy/sell every N loops (not financial advice)
-            # Replace this with your real strategy / AI call
-            signal = None
-            # simple threshold demo (placeholder)
-            # load last N closes
-            if hasattr(om, "fetch_ohlcv"):
-                candles = om._safe_request(om.fetch_ohlcv, SYMBOL, '1m', 20) if hasattr(om, "_safe_request") else om.fetch_ohlcv(SYMBOL, '1m', 20)
-                closes = [c[4] for c in candles]
-                # naive moving average signal
-                if len(closes) >= 10:
-                    sma_short = sum(closes[-5:]) / 5
-                    sma_long = sum(closes[-10:]) / 10
-                    if sma_short > sma_long:
-                        signal = "BUY"
-                    elif sma_short < sma_long:
-                        signal = "SELL"
-                    else:
-                        signal = "HOLD"
-                else:
-                    signal = "HOLD"
+            # =========================
+            # AI ENSEMBLE DECISION
+            # =========================
+
+            # ambil OHLCV window untuk AI
+            WINDOW = int(os.getenv("AI_WINDOW", "50"))
+
+            ohlcv = om._safe_request(
+                om.fetch_ohlcv, SYMBOL, '1m', WINDOW
+            ) if hasattr(om, "_safe_request") else om.fetch_ohlcv(SYMBOL, '1m', WINDOW)
+
+            # build state (samakan dengan ExchangeEnv)
+            closes = [c[4] for c in ohlcv]
+
+            import numpy as np
+            window = np.array(closes, dtype=float)
+            mean = window.mean() if window.mean() != 0 else 1.0
+            window_norm = window / mean
+
+            loop_count = 0
+            if loop_count % 5 == 0 or 'balance' not in locals():
+                balance = om.exchange.fetch_balance()
+                loop_count += 1
+
+            usdt = balance['free'].get('USDT', 0)
+            btc = balance['free'].get('BTC', 0)
+
+            portfolio_value = usdt + btc * price + 1e-9
+            cash_ratio = usdt / portfolio_value
+            pos_ratio = btc
+
+            state = np.concatenate([window_norm, [cash_ratio, pos_ratio]]).astype(np.float32)
+
+            # AI decision
+            action = ensemble.decide(state)
+
+            # =========================
+            # RISK MANAGEMENT GATE
+            # =========================
+
+            equity = om.exchange.fetch_balance()['total']['USDT']
+            allowed, reason = risk.allow_trade(equity)
+
+            if not allowed:
+                safe_print("[RISK BLOCKED]", reason)
+                time.sleep(SLEEP_SECONDS)
+                continue
+
+            # ATR for SL/TP
+            import pandas as pd
+            df = pd.DataFrame(
+                ohlcv,
+                columns=["ts", "open", "high", "low", "close", "volume"]
+            )
+            atr = ATR(df).iloc[-1]
+
+            if atr is None or atr != atr:
+                safe_print("ATR invalid, skip trade")
+                continue
+
+            stop_loss = price - atr * 1.5
+            take_profit = price + atr * 1.5 * risk.min_rr
+
+            qty = risk.position_size(equity, price, stop_loss)
+            if qty <= 0:
+                safe_print("Position size <= 0")
+                continue
+
+            if action == 1:
+                signal = "BUY"
+            elif action == 2:
+                signal = "SELL"
             else:
                 signal = "HOLD"
 
-            safe_print("Signal:", signal)
+            safe_print("AI Signal:", signal)
 
             # Execute signal
             if signal == "BUY":
@@ -140,6 +205,7 @@ def main_loop():
                 # order_manager should accept amount in quote or base depending on implementation
                 if hasattr(om, "market_buy"):
                     res = om._safe_request(om.market_buy, SYMBOL, amount) if hasattr(om, "_safe_request") else om.market_buy(SYMBOL, amount)
+                    risk.register_trade()
                     safe_print("Buy order result:", res)
                     # try to extract executed price & amount
                     try:
@@ -157,6 +223,7 @@ def main_loop():
                 amount_base = float(os.getenv("TRADE_AMOUNT_BASE", "0.0005"))
                 if hasattr(om, "market_sell"):
                     res = om._safe_request(om.market_sell, SYMBOL, amount_base) if hasattr(om, "_safe_request") else om.market_sell(SYMBOL, amount_base)
+                    risk.register_trade()
                     safe_print("Sell order result:", res)
                     try:
                         exec_price = float(res.get("price") or res.get("avgPrice") or price)

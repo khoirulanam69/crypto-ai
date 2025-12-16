@@ -134,10 +134,15 @@ class OrderManager:
             return None
 
         return self._safe_request(
-            self.exchange.create_market_buy_order,
+            self.exchange.create_order,
             symbol,
+            "market",
+            "buy",
+            None,
             quote_amount,
+            {"quoteOrderQty": quote_amount},
         )
+
 
     def create_market_sell(self, symbol, base_amount):
         if self.mode == "paper":
@@ -176,3 +181,12 @@ class OrderManager:
                     pass
 
         return total
+    
+    def market_buy(self, symbol, quote_amount):
+        price = self.exchange.fetch_ticker(symbol)['last']
+        amount = quote_amount / price
+        return self.exchange.create_market_buy_order(symbol, amount)
+
+    def market_sell(self, symbol, amount):
+        return self.exchange.create_market_sell_order(symbol, amount)
+
