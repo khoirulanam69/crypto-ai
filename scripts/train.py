@@ -7,7 +7,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
 from ai.envs.exchange_env import ExchangeEnv
 
-DATA = "data/bootstrap.csv"
+DATA = "data/history_BTCUSDT_1h.csv"
 MODEL_OUT = "models/ppo_trend.zip"
 
 df = pd.read_csv(DATA)
