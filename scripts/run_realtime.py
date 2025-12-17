@@ -162,11 +162,11 @@ def main_loop():
             # RISK MANAGEMENT GATE
             # =========================
 
-            equity = om.exchange.fetch_balance()['total']['USDT']
-            allowed, reason = risk.allow_trade(equity)
+            equity = om.get_equity(SYMBOL)
 
+            allowed, reason = risk.allow_trade(equity)
             if not allowed:
-                safe_print("[RISK BLOCKED]", reason)
+                safe_print(f"[RISK BLOCKED] {reason}")
                 time.sleep(SLEEP_SECONDS)
                 continue
 
