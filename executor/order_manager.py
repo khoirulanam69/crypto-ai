@@ -13,7 +13,6 @@ class OrderManager:
     def __init__(self, testnet: bool = False):
         self.testnet = testnet
         self.mode = os.getenv("MODE", "paper")
-        self.state = StateManager(self.exchange, symbol=os.getenv("SYMBOL", "BTC/USDT"))
 
         # ======================
         # API KEYS
@@ -59,6 +58,12 @@ class OrderManager:
             self.exchange.load_time_difference()
         except Exception as e:
             print("[OrderManager] time sync failed:", e)
+
+        # ===============================
+        # INIT STATE MANAGER
+        # ===============================
+        symbol = os.getenv("SYMBOL", "BTC/USDT")
+        self.state = StateManager(self.exchange, symbol)
 
         # ======================
         # APPLY PROXY (IF ANY)
