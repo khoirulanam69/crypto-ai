@@ -164,11 +164,6 @@ def main_loop():
             # AI decision
             raw_action = ensemble.decide(state)
 
-            exec_action = raw_action
-            if exec_action == 2 and not tracker.has_position():
-                print("[GUARD] No position, SELL blocked → HOLD")
-                exec_action = 0
-
             # =========================
             # RISK MANAGEMENT GATE
             # =========================
