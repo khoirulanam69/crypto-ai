@@ -159,28 +159,20 @@ class OrderManager:
     # FETCH EQUITY
     # ========================================================
 
-    def get_equity(self):
-        """
-        Return total equity in quote currency (USDT)
-        """
+    def get_equity(self, symbol="BTC/USDT"):
         balance = self.exchange.fetch_balance()
 
-        total = 0.0
-        for asset, data in balance['total'].items():
-            if data is None or data <= 0:
-                continue
+        base, quote = symbol.split("/")
 
-            if asset == "USDT":
-                total += float(data)
-            else:
-                symbol = f"{asset}/USDT"
-                try:
-                    price = self.exchange.fetch_ticker(symbol)["last"]
-                    total += float(data) * price
-                except Exception:
-                    pass
+        free_quote = balance["free"].get(quote, 0)
+        free_base = balance["free"].get(base, 0)
 
-        return total
+        ticker = self.exchange.fetch_ticker(symbol)
+        price = float(ticker["last"])
+
+        equity = free_quote + free_base * price
+        return float(equity)
+
     
     def market_buy(self, symbol, quote_amount):
         price = self.exchange.fetch_ticker(symbol)['last']
