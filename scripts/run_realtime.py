@@ -301,7 +301,7 @@ def main_loop():
             # =========================
             replay.append(
                 price=price,
-                action=int(action),
+                action=int(raw_action),
                 reward=float(reward),
                 equity=float(equity)
             )
