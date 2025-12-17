@@ -23,15 +23,14 @@ from ai.ensemble.ppo_trend import PPOTrend
 from ai.ensemble.ppo_mean import PPOMean
 from ai.ensemble.lstm import LSTMPrice
 from ai.ensemble.rule import RuleBased
-from risk.risk_manager import RiskManager
-from risk.indicators import ATR
 from executor.position_tracker import PositionTracker
 from ai.memory.replay_buffer import ReplayBuffer
 from ai.memory.online_trainer import fine_tune
+from risk.risk_engine import RiskEngine
 
-risk = RiskManager()
 tracker = PositionTracker()
 replay = ReplayBuffer()
+risk_engine = RiskEngine(max_dd=0.20)
 
 # settings
 SYMBOL = os.getenv("SYMBOL", "BTC/USDT")
@@ -176,6 +175,14 @@ def main_loop():
 
             equity = om.get_equity(SYMBOL)
 
+            risk_decision = risk_engine.evaluate(
+                signal=raw_action,
+                candles=ohlcv,
+                equity=equity,
+                price=price,
+                has_position=tracker.has_position()
+            )
+
             # =========================
             # MEMORY REWARD
             # =========================
@@ -183,118 +190,58 @@ def main_loop():
             if last_equity is not None:
                 reward = equity - last_equity
 
-            allowed, reason = risk.allow_trade(equity)
-            if not allowed:
-                safe_print(f"[RISK BLOCKED] {reason}")
-                time.sleep(SLEEP_SECONDS)
-                continue
+            action = risk_decision["action"]
 
-            # ATR for SL/TP
-            import pandas as pd
-            df = pd.DataFrame(
-                ohlcv,
-                columns=["ts", "open", "high", "low", "close", "volume"]
-            )
-            atr = ATR(df).iloc[-1]
+            safe_print(f"[RISK] Decision → {action}")
 
-            if atr is None or atr != atr:
-                safe_print("ATR invalid, skip trade")
-                continue
+            if action == "BUY":
+                size = risk_decision["size"]
 
-            stop_loss = price - atr * 1.5
-            take_profit = price + atr * 1.5 * risk.min_rr
-
-            qty = risk.position_size(equity, price, stop_loss)
-            if qty <= 0:
-                safe_print("Position size <= 0")
-                continue
-
-            if exec_action == 1:
-                signal = "BUY"
-            elif exec_action == 2:
-                signal = "SELL"
-            else:
-                signal = "HOLD"
-
-            safe_print("AI Signal:", signal)
-
-            # Execute signal
-            if signal == "BUY":
-                amount = float(os.getenv("TRADE_AMOUNT_QUOTE", "10"))
-
-                if hasattr(om, "safe_market_buy"):
-                    res = om._safe_request(
-                        om.safe_market_buy, SYMBOL, amount
-                    ) if hasattr(om, "_safe_request") else om.safe_market_buy(SYMBOL, amount)
-
-                    if res:  # ✅ pastikan order sukses
-                        risk.register_trade()
-                        safe_print("Buy order result:", res)
-
-                        try:
-                            exec_price = float(res.get("price") or res.get("avgPrice") or price)
-                            exec_amount = float(
-                                res.get("filledQty")
-                                or res.get("amount")
-                                or (amount / exec_price)
-                            )
-                        except Exception:
-                            exec_price = price
-                            exec_amount = 0.0
-
-                        tracker.update_from_trade({
-                            "side": "buy",
-                            "amount": exec_amount,
-                            "price": exec_price
-                        })
-
-                        log_trade(
-                            conn, "BUY", SYMBOL, exec_amount, exec_price,
-                            "paper" if PAPER else "live", note=str(res)
-                        )
+                if PAPER:
+                    exec_price = price
+                    exec_amount = size
+                    safe_print(f"[PAPER BUY] {exec_amount} @ {exec_price}")
                 else:
-                    safe_print("OrderManager has no market_buy method; skipping execution.")
+                    res = om.market_buy(SYMBOL, size)
+                    exec_price = res.get("price", price)
+                    exec_amount = res.get("amount", size)
 
-            elif signal == "SELL":
-                amount_base = float(os.getenv("TRADE_AMOUNT_BASE", "0.0005"))
+                tracker.update_from_trade({
+                    "side": "buy",
+                    "amount": exec_amount,
+                    "price": exec_price
+                })
 
-                if hasattr(om, "safe_market_sell"):
-                    res = om._safe_request(
-                        om.safe_market_sell, SYMBOL, amount_base
-                    ) if hasattr(om, "_safe_request") else om.safe_market_sell(SYMBOL, amount_base)
+                log_trade(conn, "BUY", SYMBOL, exec_amount, exec_price,
+                        "paper" if PAPER else "live", note="risk_engine")
 
-                    if res:  # ✅ pastikan order sukses
-                        risk.register_trade()
-                        safe_print("Sell order result:", res)
+            elif action == "SELL":
+                size = tracker.position_size()
 
-                        try:
-                            exec_price = float(res.get("price") or res.get("avgPrice") or price)
-                            exec_amount = float(
-                                res.get("filledQty")
-                                or res.get("amount")
-                                or amount_base
-                            )
-                        except Exception:
-                            exec_price = price
-                            exec_amount = amount_base
-
-                        # ===============================
-                        # ✅ UPDATE TRACKER (DI SINI)
-                        # ===============================
-                        tracker.update_from_trade({
-                            "side": "sell",
-                            "amount": exec_amount,
-                            "price": exec_price
-                        })
-
-                        log_trade(
-                            conn, "SELL", SYMBOL, exec_amount, exec_price,
-                            "paper" if PAPER else "live", note=str(res)
-                        )
+                if size <= 0:
+                    safe_print("[RISK] SELL ignored — no position")
                 else:
-                    safe_print("OrderManager has no market_sell method; skipping execution.")
+                    if PAPER:
+                        exec_price = price
+                        exec_amount = size
+                        safe_print(f"[PAPER SELL] {exec_amount} @ {exec_price}")
+                    else:
+                        res = om.market_sell(SYMBOL, size)
+                        exec_price = res.get("price", price)
+                        exec_amount = res.get("amount", size)
+
+                    tracker.update_from_trade({
+                        "side": "sell",
+                        "amount": exec_amount,
+                        "price": exec_price
+                    })
+
+                    log_trade(conn, "SELL", SYMBOL, exec_amount, exec_price,
+                            "paper" if PAPER else "live", note="risk_engine")
+
             else:
-                safe_print("No action.")
+                safe_print("[RISK] HOLD")
+
 
             # =========================
             # SAVE EXPERIENCE
