@@ -1,3 +1,4 @@
+# risk/risk_manager.py
 import time
 
 class RiskManager:
@@ -16,32 +17,70 @@ class RiskManager:
         self.peak_equity = None
         self.last_trade_ts = 0
 
+    # ============================
+    # EQUITY TRACKING
+    # ============================
+
     def update_equity(self, equity):
+        if equity is None or equity <= 0:
+            return
+
         if self.peak_equity is None:
             self.peak_equity = equity
+            return
+
         self.peak_equity = max(self.peak_equity, equity)
 
+    # ============================
+    # TRADE PERMISSION
+    # ============================
+
     def allow_trade(self, equity):
+        # Guard equity invalid
+        if equity is None or equity <= 0:
+            return False, "INVALID_EQUITY"
+
+        # Init peak equity
+        if self.peak_equity is None or self.peak_equity <= 0:
+            self.peak_equity = equity
+            return True, "INIT"
+
         self.update_equity(equity)
 
+        # Guard division by zero
+        if self.peak_equity <= 0:
+            return False, "INVALID_PEAK_EQUITY"
+
         drawdown = (self.peak_equity - equity) / self.peak_equity
+
         if drawdown >= self.max_drawdown:
-            return False, "MAX_DRAWDOWN"
+            return False, f"MAX_DRAWDOWN {drawdown:.2%}"
 
         if time.time() - self.last_trade_ts < self.cooldown_sec:
             return False, "COOLDOWN"
 
         return True, "OK"
 
-    def position_size(self, equity, entry_price, stop_price):
-        risk_amount = equity * self.max_risk_per_trade
-        risk_per_unit = abs(entry_price - stop_price)
+    # ============================
+    # POSITION SIZING
+    # ============================
 
+    def position_size(self, equity, entry_price, stop_price):
+        if equity is None or equity <= 0:
+            return 0
+
+        risk_per_unit = abs(entry_price - stop_price)
         if risk_per_unit <= 0:
             return 0
 
+        risk_amount = equity * self.max_risk_per_trade
         qty = risk_amount / risk_per_unit
-        return qty
+
+        return max(qty, 0)
+
+    # ============================
+    # REGISTER TRADE
+    # ============================
 
     def register_trade(self):
         self.last_trade_ts = time.time()
