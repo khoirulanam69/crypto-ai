@@ -324,8 +324,8 @@ def main_loop():
             error_count = 0
             time.sleep(SLEEP_SECONDS)
 
-            safe_print("Equity:", equity, "| Cash:", round(om.state.state["cash"], 2), "| Position:", round(om.state.state["position"], 6))
-            safe_print("Reward:", reward)
+            safe_print(f"Equity: {equity:.2f}", "| Cash:", round(om.state.state["cash"], 2), "| Position:", round(om.state.state["position"], 6))
+            safe_print(f"Reward: {reward:.2f}", f"| Portfolio Value: {portfolio_value:.2f}")
 
         except Exception as e:
             error_count += 1
