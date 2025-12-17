@@ -124,35 +124,55 @@ class OrderManager:
             timeframe=timeframe,
             limit=limit,
         )
+    
+    # ==========================================================
+    # GET BALANCE
+    # ==========================================================
+
+    def get_balance(self, asset):
+        balance = self.exchange.fetch_balance()
+        return float(balance.get(asset, {}).get("free", 0))
 
     # ==========================================================
     # ORDERS
     # ==========================================================
-    def create_market_buy(self, symbol, quote_amount):
-        if self.mode == "paper":
-            print(f"[PAPER BUY] {symbol} quote={quote_amount}")
+    
+    def safe_market_buy(self, symbol, quote_amount):
+        quote = symbol.split("/")[1]
+        free_balance = self.get_balance(quote)
+
+        if free_balance < quote_amount:
+            print(f"[SKIP] Insufficient {quote} balance")
+            return None
+
+        if quote_amount < 5:
+            print("[SKIP] Buy below minimum notional")
             return None
 
         return self._safe_request(
-            self.exchange.create_order,
+            self.exchange.create_market_buy_order,
             symbol,
-            "market",
-            "buy",
-            None,
-            quote_amount,
-            {"quoteOrderQty": quote_amount},
+            quote_amount
         )
+    
+    def safe_market_sell(self, symbol, amount):
+        base = symbol.split("/")[0]
+        free_balance = self.get_balance(base)
 
+        if free_balance <= 0:
+            print(f"[SKIP] No {base} balance to sell")
+            return None
 
-    def create_market_sell(self, symbol, base_amount):
-        if self.mode == "paper":
-            print(f"[PAPER SELL] {symbol} base={base_amount}")
+        sell_amount = min(amount, free_balance * 0.999)
+
+        if sell_amount * self.exchange.fetch_ticker(symbol)['last'] < 5:
+            print("[SKIP] Sell amount below minimum notional")
             return None
 
         return self._safe_request(
             self.exchange.create_market_sell_order,
             symbol,
-            base_amount,
+            sell_amount
         )
 
     # ========================================================
@@ -172,13 +192,3 @@ class OrderManager:
 
         equity = free_quote + free_base * price
         return float(equity)
-
-    
-    def market_buy(self, symbol, quote_amount):
-        price = self.exchange.fetch_ticker(symbol)['last']
-        amount = quote_amount / price
-        return self.exchange.create_market_buy_order(symbol, amount)
-
-    def market_sell(self, symbol, amount):
-        return self.exchange.create_market_sell_order(symbol, amount)
-

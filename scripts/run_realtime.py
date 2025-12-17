@@ -25,8 +25,10 @@ from ai.ensemble.lstm import LSTMPrice
 from ai.ensemble.rule import RuleBased
 from risk.risk_manager import RiskManager
 from risk.indicators import ATR
+from executor.position_tracker import PositionTracker
 
 risk = RiskManager()
+tracker = PositionTracker()
 
 # settings
 SYMBOL = os.getenv("SYMBOL", "BTC/USDT")
@@ -190,6 +192,9 @@ def main_loop():
                 safe_print("Position size <= 0")
                 continue
 
+            if action == 2 and not tracker.has_position():
+                print("[GUARD] No position, SELL blocked → HOLD")
+                action = 0
             if action == 1:
                 signal = "BUY"
             elif action == 2:
@@ -201,37 +206,77 @@ def main_loop():
 
             # Execute signal
             if signal == "BUY":
-                amount = float(os.getenv("TRADE_AMOUNT_QUOTE", "10"))  # buy for $10
-                # order_manager should accept amount in quote or base depending on implementation
-                if hasattr(om, "market_buy"):
-                    res = om._safe_request(om.market_buy, SYMBOL, amount) if hasattr(om, "_safe_request") else om.market_buy(SYMBOL, amount)
-                    risk.register_trade()
-                    safe_print("Buy order result:", res)
-                    # try to extract executed price & amount
-                    try:
-                        exec_price = float(res.get("price") or res.get("avgPrice") or price)
-                        exec_amount = float(res.get("filledQty") or res.get("amount") or (amount / exec_price))
-                    except Exception:
-                        exec_price = price
-                        exec_amount = 0.0
-                    log_trade(conn, "BUY", SYMBOL, exec_amount, exec_price, "paper" if PAPER else "live", note=str(res))
+                amount = float(os.getenv("TRADE_AMOUNT_QUOTE", "10"))
+
+                if hasattr(om, "safe_market_buy"):
+                    res = om._safe_request(
+                        om.safe_market_buy, SYMBOL, amount
+                    ) if hasattr(om, "_safe_request") else om.safe_market_buy(SYMBOL, amount)
+
+                    if res:  # ✅ pastikan order sukses
+                        risk.register_trade()
+                        safe_print("Buy order result:", res)
+
+                        try:
+                            exec_price = float(res.get("price") or res.get("avgPrice") or price)
+                            exec_amount = float(
+                                res.get("filledQty")
+                                or res.get("amount")
+                                or (amount / exec_price)
+                            )
+                        except Exception:
+                            exec_price = price
+                            exec_amount = 0.0
+
+                        tracker.update_from_trade({
+                            "side": "buy",
+                            "amount": exec_amount,
+                            "price": exec_price
+                        })
+
+                        log_trade(
+                            conn, "BUY", SYMBOL, exec_amount, exec_price,
+                            "paper" if PAPER else "live", note=str(res)
+                        )
                 else:
                     safe_print("OrderManager has no market_buy method; skipping execution.")
 
             elif signal == "SELL":
-                # attempt to sell a fixed base amount or compute from holdings
                 amount_base = float(os.getenv("TRADE_AMOUNT_BASE", "0.0005"))
-                if hasattr(om, "market_sell"):
-                    res = om._safe_request(om.market_sell, SYMBOL, amount_base) if hasattr(om, "_safe_request") else om.market_sell(SYMBOL, amount_base)
-                    risk.register_trade()
-                    safe_print("Sell order result:", res)
-                    try:
-                        exec_price = float(res.get("price") or res.get("avgPrice") or price)
-                        exec_amount = float(res.get("filledQty") or res.get("amount") or amount_base)
-                    except Exception:
-                        exec_price = price
-                        exec_amount = amount_base
-                    log_trade(conn, "SELL", SYMBOL, exec_amount, exec_price, "paper" if PAPER else "live", note=str(res))
+
+                if hasattr(om, "safe_market_sell"):
+                    res = om._safe_request(
+                        om.safe_market_sell, SYMBOL, amount_base
+                    ) if hasattr(om, "_safe_request") else om.safe_market_sell(SYMBOL, amount_base)
+
+                    if res:  # ✅ pastikan order sukses
+                        risk.register_trade()
+                        safe_print("Sell order result:", res)
+
+                        try:
+                            exec_price = float(res.get("price") or res.get("avgPrice") or price)
+                            exec_amount = float(
+                                res.get("filledQty")
+                                or res.get("amount")
+                                or amount_base
+                            )
+                        except Exception:
+                            exec_price = price
+                            exec_amount = amount_base
+
+                        # ===============================
+                        # ✅ UPDATE TRACKER (DI SINI)
+                        # ===============================
+                        tracker.update_from_trade({
+                            "side": "sell",
+                            "amount": exec_amount,
+                            "price": exec_price
+                        })
+
+                        log_trade(
+                            conn, "SELL", SYMBOL, exec_amount, exec_price,
+                            "paper" if PAPER else "live", note=str(res)
+                        )
                 else:
                     safe_print("OrderManager has no market_sell method; skipping execution.")
             else:
