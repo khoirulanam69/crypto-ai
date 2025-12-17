@@ -32,7 +32,6 @@ from ai.memory.online_trainer import fine_tune
 risk = RiskManager()
 tracker = PositionTracker()
 replay = ReplayBuffer()
-step_counter = 0
 
 # settings
 SYMBOL = os.getenv("SYMBOL", "BTC/USDT")
@@ -84,6 +83,7 @@ def safe_print(*a, **k):
 
 def main_loop():
     last_equity = None
+    step_counter = 0
     safe_print("Starting realtime bot (paper=%s)..." % PAPER)
     # create proxy manager (it auto-loads PROXIES from env if set)
     proxy_mgr = ProxyManager()
