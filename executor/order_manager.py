@@ -4,24 +4,16 @@ import time
 from dotenv import load_dotenv
 from utils.dns_resolver import DNSResolver
 from utils.proxy_manager import ProxyManager
+from executor.state_manager import StateManager
 
 load_dotenv()
 
 
 class OrderManager:
-    """
-    Central execution layer for exchange interaction.
-    Responsible for:
-    - Exchange initialization
-    - Time sync
-    - Proxy handling
-    - DNS fallback
-    - Safe request retry
-    """
-
     def __init__(self, testnet: bool = False):
         self.testnet = testnet
         self.mode = os.getenv("MODE", "paper")
+        self.state = StateManager(self.exchange, symbol=os.getenv("SYMBOL", "BTC/USDT"))
 
         # ======================
         # API KEYS
@@ -141,6 +133,10 @@ class OrderManager:
         quote = symbol.split("/")[1]
         free_balance = self.get_balance(quote)
 
+        if not self.state.can_buy():
+            print("[GUARD] Insufficient quote balance → HOLD")
+            return None
+
         if free_balance < quote_amount:
             print(f"[SKIP] Insufficient {quote} balance")
             return None
@@ -158,6 +154,10 @@ class OrderManager:
     def safe_market_sell(self, symbol, amount):
         base = symbol.split("/")[0]
         free_balance = self.get_balance(base)
+        
+        if not self.state.can_sell():
+            print("[GUARD] No position, SELL blocked → HOLD")
+            return None
 
         if free_balance <= 0:
             print(f"[SKIP] No {base} balance to sell")

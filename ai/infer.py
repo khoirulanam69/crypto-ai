@@ -1,7 +1,10 @@
+# ai/infer.py
 import numpy as np
 import pandas as pd
-from stable_baselines3 import PPO
 import os
+from stable_baselines3 import PPO
+from executor.state_manager import StateManager
+from executor.order_manager import OrderManager
 
 MODEL = os.getenv("MODEL", "models/ppo_live.zip")
 WINDOW = int(os.getenv("AI_WINDOW", "50"))
@@ -16,11 +19,12 @@ def load_model():
     return _model
 
 
-def candles_to_features(candles: list):
+def candles_to_features(candles, state):
     """
-    candles: list of [ts, open, high, low, close, volume]
-    return numpy obs sesuai ExchangeEnv
+    candles: list [ts, open, high, low, close, volume]
+    state: dict dari StateManager
     """
+
     df = pd.DataFrame(
         candles,
         columns=["ts", "open", "high", "low", "close", "volume"]
@@ -31,12 +35,13 @@ def candles_to_features(candles: list):
     mean = closes.mean() if closes.mean() != 0 else 1.0
     closes_norm = closes / mean
 
-    # feature tambahan
-    returns = np.diff(closes) / closes[:-1]
-    volatility = np.std(returns) if len(returns) > 1 else 0.0
+    # ====== STATE REAL ======
+    cash = state["cash"]
+    position = state["position"]
+    equity = state["equity"]
 
-    cash_ratio = 1.0    # realtime cash ditangani env
-    pos_ratio = 0.0     # realtime position ditangani env
+    cash_ratio = cash / (equity + 1e-9)
+    pos_ratio = position
 
     obs = np.concatenate(
         [closes_norm, [cash_ratio, pos_ratio]]
@@ -46,15 +51,24 @@ def candles_to_features(candles: list):
 
 
 class AIDecisionEngine:
-    def __init__(self, symbol: str):
-        self.symbol = symbol
+    def __init__(self, order_manager: OrderManager):
+        self.om = order_manager
         self.model = load_model()
 
     def decide(self, candles: list):
-        """
-        candles = list of OHLCV
-        return action int
-        """
-        obs = candles_to_features(candles)
+        # ====== SYNC REAL STATE ======
+        state = self.om.state.sync()
+
+        obs = candles_to_features(candles, state)
         action, _ = self.model.predict(obs, deterministic=False)
-        return int(action)
+
+        action = int(action)
+
+        # ====== GUARD FINAL ======
+        if action == 1 and not self.om.state.can_buy():
+            return 0
+
+        if action == 2 and not self.om.state.can_sell():
+            return 0
+
+        return action
