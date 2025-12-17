@@ -26,9 +26,14 @@ from ai.ensemble.rule import RuleBased
 from risk.risk_manager import RiskManager
 from risk.indicators import ATR
 from executor.position_tracker import PositionTracker
+from ai.memory.replay_buffer import ReplayBuffer
+from ai.memory.online_trainer import fine_tune
 
 risk = RiskManager()
 tracker = PositionTracker()
+replay = ReplayBuffer()
+last_equity = None
+step_counter = 0
 
 # settings
 SYMBOL = os.getenv("SYMBOL", "BTC/USDT")
@@ -166,6 +171,13 @@ def main_loop():
 
             equity = om.get_equity(SYMBOL)
 
+            # =========================
+            # MEMORY REWARD
+            # =========================
+            reward = 0.0
+            if last_equity is not None:
+                reward = equity - last_equity
+
             allowed, reason = risk.allow_trade(equity)
             if not allowed:
                 safe_print(f"[RISK BLOCKED] {reason}")
@@ -281,6 +293,31 @@ def main_loop():
                     safe_print("OrderManager has no market_sell method; skipping execution.")
             else:
                 safe_print("No action.")
+
+            # =========================
+            # SAVE EXPERIENCE
+            # =========================
+            replay.append(
+                price=price,
+                action=int(action),
+                reward=float(reward),
+                equity=float(equity)
+            )
+
+            last_equity = equity
+            step_counter += 1
+
+            # =========================
+            # D5 - ONLINE FINE TUNE
+            # =========================
+            FINE_TUNE_EVERY = int(os.getenv("FINE_TUNE_EVERY", "50"))
+
+            if step_counter % FINE_TUNE_EVERY == 0:
+                safe_print("[AI] Online learning triggered...")
+                try:
+                    fine_tune()
+                except Exception as e:
+                    safe_print("[AI] Fine-tune failed:", e)
 
             error_count = 0
             time.sleep(SLEEP_SECONDS)
