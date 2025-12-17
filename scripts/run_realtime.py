@@ -163,7 +163,12 @@ def main_loop():
             state = np.concatenate([window_norm, [cash_ratio, pos_ratio]]).astype(np.float32)
 
             # AI decision
-            action = ensemble.decide(state)
+            raw_action = ensemble.decide(state)
+
+            exec_action = raw_action
+            if exec_action == 2 and not tracker.has_position():
+                print("[GUARD] No position, SELL blocked → HOLD")
+                exec_action = 0
 
             # =========================
             # RISK MANAGEMENT GATE
@@ -204,12 +209,9 @@ def main_loop():
                 safe_print("Position size <= 0")
                 continue
 
-            if action == 2 and not tracker.has_position():
-                print("[GUARD] No position, SELL blocked → HOLD")
-                action = 0
-            if action == 1:
+            if exec_action == 1:
                 signal = "BUY"
-            elif action == 2:
+            elif exec_action == 2:
                 signal = "SELL"
             else:
                 signal = "HOLD"
@@ -321,6 +323,9 @@ def main_loop():
 
             error_count = 0
             time.sleep(SLEEP_SECONDS)
+
+            safe_print("Equity:", equity, "| Cash:", round(om.state.state["cash"], 2), "| Position:", round(om.state.state["position"], 6))
+            safe_print("Reward:", reward)
 
         except Exception as e:
             error_count += 1
