@@ -1,25 +1,14 @@
-from collections import defaultdict
-
+# ai/ensemble/aggregator.py
 class EnsembleAggregator:
-    def __init__(self, models, threshold=0.6):
+    def __init__(self, models):
         self.models = models
-        self.threshold = threshold
 
     def decide(self, state):
-        votes = defaultdict(float)
+        votes = {0: 0.0, 1: 0.0, 2: 0.0}
 
         for m in self.models:
-            action, conf = m.predict(state)
-            votes[action] += conf * m.weight
+            action, confidence = m.predict(state)
+            votes[action] += confidence
 
-        total = sum(votes.values())
-        if total == 0:
-            return 0
-
-        best_action = max(votes, key=votes.get)
-        confidence = votes[best_action] / total
-
-        if confidence < self.threshold:
-            return 0
-
-        return best_action
+        # ambil action dengan bobot terbesar
+        return max(votes, key=votes.get)

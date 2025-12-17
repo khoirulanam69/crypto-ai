@@ -1,20 +1,18 @@
-from stable_baselines3 import PPO
-from .base import BaseModel
+# ai/ensemble/ppo_mean.py
 import os
 import numpy as np
+from stable_baselines3 import PPO
 
-class PPOMean(BaseModel):
-    name = "ppo_mean"
-    weight = 1.0
-
+class PPOMean:
     def __init__(self):
-        self.model = PPO.load(os.getenv("PPO_MEAN_MODEL"))
+        model_path = os.getenv("PPO_MEAN_MODEL")
+        if not model_path:
+            raise ValueError("PPO_MEAN_MODEL env not set")
+
+        self.model = PPO.load(model_path)
 
     def predict(self, state):
+        state = np.array(state, dtype=np.float32).reshape(1, -1)
         action, _ = self.model.predict(state, deterministic=True)
-
-        # confidence lebih tinggi saat deviasi besar
-        vol = np.std(state)
-        confidence = min(1.0, vol * 10)
-
+        confidence = 0.55
         return int(action), confidence
