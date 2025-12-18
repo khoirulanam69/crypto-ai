@@ -92,9 +92,6 @@ def main_loop():
     # INIT AI ENSEMBLE (ONE TIME)
     # =========================
     ensemble = EnsembleAggregator([
-        PPOTrend(),
-        PPOMean(),
-        LSTMPrice(),
         RuleBased()
     ])
 
