@@ -7,7 +7,7 @@ import pandas as pd
 
 class RiskEngine:
     def __init__(self, max_dd=0.2, risk_per_trade=0.01, trail_pct=0.005):
-        self.max_dd = DrawdownGuard(max_dd)
+        self.max_dd = max_dd
         self.risk_per_trade = risk_per_trade
         self.trail_pct = trail_pct
         self.position = PositionState()
