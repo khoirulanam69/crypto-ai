@@ -1,3 +1,5 @@
+import time
+
 class PositionTracker:
     def __init__(self):
         self.position = 0.0
@@ -7,6 +9,7 @@ class PositionTracker:
             self.position += trade['amount']
         elif trade['side'] == 'sell':
             self.position -= trade['amount']
+        self.state.state["last_update"] = time.time()
 
     def has_position(self):
         return self.position > 0

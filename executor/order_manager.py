@@ -8,7 +8,6 @@ from executor.state_manager import StateManager
 
 load_dotenv()
 
-
 class OrderManager:
     def __init__(self, testnet: bool = False):
         self.testnet = testnet
@@ -62,8 +61,8 @@ class OrderManager:
         # ===============================
         # INIT STATE MANAGER
         # ===============================
-        symbol = os.getenv("SYMBOL", "BTC/USDT")
-        self.state = StateManager(self.exchange, symbol)
+        initial_cash = float(os.getenv("INITIAL_CASH", "0"))
+        self.state = StateManager(initial_cash)
 
         # ======================
         # APPLY PROXY (IF ANY)
