@@ -230,6 +230,8 @@ def main_loop():
                         "amount": exec_amount,
                         "price": exec_price
                     })
+                    
+                    risk_engine.on_position_closed()
 
                     log_trade(conn, "SELL", SYMBOL, exec_amount, exec_price,
                             "paper" if PAPER else "live", note="risk_engine")
@@ -237,6 +239,8 @@ def main_loop():
             else:
                 safe_print("[RISK] HOLD")
 
+            safe_print(f"Equity: {equity:.2f}", "| Cash:", round(om.state.state["cash"], 2), "| Position:", round(om.state.state["position"], 6))
+            safe_print(f"Reward: {reward:.2f}", f"| Portfolio Value: {portfolio_value:.2f}")
 
             # =========================
             # SAVE EXPERIENCE
@@ -265,9 +269,6 @@ def main_loop():
 
             error_count = 0
             time.sleep(SLEEP_SECONDS)
-
-            safe_print(f"Equity: {equity:.2f}", "| Cash:", round(om.state.state["cash"], 2), "| Position:", round(om.state.state["position"], 6))
-            safe_print(f"Reward: {reward:.2f}", f"| Portfolio Value: {portfolio_value:.2f}")
 
         except Exception as e:
             error_count += 1
