@@ -1,6 +1,3 @@
-from .volatility import atr
-from .position_sizer import calc_position_size
-from .drawdown_guard import DrawdownGuard
 from executor.position_state import PositionState
 from risk.indicators import ATR
 import pandas as pd
@@ -73,3 +70,11 @@ class RiskEngine:
 
     def on_position_closed(self):
         self.position.reset()
+
+    def allow_training(self, equity):
+        if self.peak_equity <= 0:
+            self.peak_equity = equity
+            return True
+
+        dd = (self.peak_equity - equity) / self.peak_equity
+        return dd < self.max_dd

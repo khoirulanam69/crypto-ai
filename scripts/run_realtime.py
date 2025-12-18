@@ -230,7 +230,7 @@ def main_loop():
                         "amount": exec_amount,
                         "price": exec_price
                     })
-                    
+
                     risk_engine.on_position_closed()
 
                     log_trade(conn, "SELL", SYMBOL, exec_amount, exec_price,
@@ -256,17 +256,31 @@ def main_loop():
             step_counter += 1
 
             # =========================
-            # D5 - ONLINE FINE TUNE
+            # D5 – SAFE ONLINE LEARNING
             # =========================
-            FINE_TUNE_EVERY = int(os.getenv("FINE_TUNE_EVERY", "50"))
 
-            if step_counter % FINE_TUNE_EVERY == 0:
-                safe_print("[AI] Online learning triggered...")
-                try:
-                    fine_tune()
-                except Exception as e:
-                    safe_print("[AI] Fine-tune failed:", e)
+            ENABLE_ONLINE = os.getenv("ENABLE_ONLINE_LEARNING", "false").lower() == "true"
+            FINE_TUNE_EVERY = int(os.getenv("FINE_TUNE_EVERY", "500"))
+            MIN_REPLAY_SIZE = int(os.getenv("MIN_REPLAY_SIZE", "200"))
+            MAX_DD_FOR_TRAIN = float(os.getenv("MAX_DD_FOR_TRAIN", "0.10"))
 
+            if ENABLE_ONLINE:
+                if step_counter % FINE_TUNE_EVERY == 0:
+                    # guard 1: replay buffer cukup
+                    if replay.size() < MIN_REPLAY_SIZE:
+                        safe_print("[AI] Skip fine-tune: replay buffer too small")
+                    # guard 2: equity sehat
+                    elif not risk_engine.allow_training(equity):
+                        safe_print("[AI] Skip fine-tune: drawdown too high")
+                    else:
+                        safe_print("[AI] Online learning triggered...")
+                        try:
+                            fine_tune()
+                            safe_print("[AI] Fine-tune completed")
+                        except Exception as e:
+                            safe_print("[AI] Fine-tune failed:", e)
+
+            # reset error counter & sleep
             error_count = 0
             time.sleep(SLEEP_SECONDS)
 
