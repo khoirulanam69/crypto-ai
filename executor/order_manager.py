@@ -18,7 +18,7 @@ class OrderManager:
         self.mode = os.getenv("MODE", "paper")
 
         self.debug = os.getenv("DEBUG", "false").lower() == "true"
-        
+
         # Rate limiting
         self.last_request_time = 0
         self.min_request_interval = 0.1  # 100ms between requests
@@ -72,7 +72,7 @@ class OrderManager:
             }
         })
         self.exchange.aiohttp_trust_env = True  # Allow proxy from env
-        self.exchange.verbose = DEBUG  # Debug mode
+        self.exchange.verbose = self.debug  # Debug mode
 
         # ======================
         # TIME SYNC (CRITICAL)
