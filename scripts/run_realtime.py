@@ -1,22 +1,19 @@
 # scripts/run_realtime.py
 import os
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 import time
 import signal
 import sqlite3
 import traceback
+import numpy as np
 from datetime import datetime
 from dotenv import load_dotenv
-import sys
-import os
-
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 # load env
 load_dotenv()
 
-# imports from your project
-# adjust import path if different (e.g., executor.order_manager)
-from executor.order_manager import OrderManager  # your existing patched file
+from executor.order_manager import OrderManager
 from utils.proxy_manager import ProxyManager
 from ai.ensemble.aggregator import EnsembleAggregator
 from ai.ensemble.ppo_trend import PPOTrend
@@ -38,6 +35,7 @@ SLEEP_SECONDS = float(os.getenv("LOOP_INTERVAL", "15"))   # how often to check p
 PAPER = os.getenv("MODE", "paper").lower() == "paper"
 DB_PATH = os.getenv("TRADES_DB", "trades.db")
 MAX_ERRORS_BEFORE_RESTART = int(os.getenv("MAX_ERRORS_BEFORE_RESTART", "10"))
+DEBUG = os.getenv("DEBUG", "false").lower() == "true"
 
 stop_requested = False
 
@@ -51,7 +49,7 @@ signal.signal(signal.SIGTERM, signal_handler)
 
 # lightweight DB helper
 def init_db(path=DB_PATH):
-    conn = sqlite3.connect(path, check_same_thread=False)
+    conn = sqlite3.connect(path, timeout=10.0)
     cur = conn.cursor()
     cur.execute("""
     CREATE TABLE IF NOT EXISTS trades (
@@ -102,6 +100,7 @@ def main_loop():
     conn = init_db()
 
     error_count = 0
+    balance = None
 
     while not stop_requested:
         try:
@@ -139,21 +138,24 @@ def main_loop():
             # build state (samakan dengan ExchangeEnv)
             closes = [c[4] for c in ohlcv]
 
-            import numpy as np
             window = np.array(closes, dtype=float)
-            mean = window.mean() if window.mean() != 0 else 1.0
-            window_norm = window / mean
+            mean_val = window.mean()
+            if mean_val == 0:
+                window_norm = window.copy()
+            else:
+                window_norm = window / mean_val
 
-            loop_count = 0
-            if loop_count % 5 == 0 or 'balance' not in locals():
+            if step_counter % 5 == 0 or balance is None:
                 balance = om.exchange.fetch_balance()
-                loop_count += 1
 
             usdt = balance['free'].get('USDT', 0)
             btc = balance['free'].get('BTC', 0)
 
             portfolio_value = usdt + btc * price + 1e-9
-            cash_ratio = usdt / portfolio_value
+            if portfolio_value < 1e-9:
+                cash_ratio = 0.0
+            else:
+                cash_ratio = usdt / portfolio_value
             pos_ratio = btc
 
             state = np.concatenate([window_norm, [cash_ratio, pos_ratio]]).astype(np.float32)
@@ -259,14 +261,15 @@ def main_loop():
             ENABLE_ONLINE = os.getenv("ENABLE_ONLINE_LEARNING", "false").lower() == "true"
             FINE_TUNE_EVERY = int(os.getenv("FINE_TUNE_EVERY", "500"))
             MIN_REPLAY_SIZE = int(os.getenv("MIN_REPLAY_SIZE", "200"))
+            MAX_REPLAY_SIZE = int(os.getenv("MAX_REPLAY_SIZE", "10000"))
             MAX_DD_FOR_TRAIN = float(os.getenv("MAX_DD_FOR_TRAIN", "0.10"))
 
             if ENABLE_ONLINE:
                 if step_counter % FINE_TUNE_EVERY == 0:
-                    # guard 1: replay buffer cukup
-                    if replay.size() < MIN_REPLAY_SIZE:
+                    if replay.size() > MAX_REPLAY_SIZE:
+                        replay.trim_oldest(MAX_REPLAY_SIZE // 2)
+                    elif replay.size() < MIN_REPLAY_SIZE:
                         safe_print("[AI] Skip fine-tune: replay buffer too small")
-                    # guard 2: equity sehat
                     elif not risk_engine.allow_training(equity):
                         safe_print("[AI] Skip fine-tune: drawdown too high")
                     else:
@@ -283,8 +286,9 @@ def main_loop():
 
         except Exception as e:
             error_count += 1
-            safe_print("Loop error:", str(e))
-            traceback.print_exc()
+            safe_print(f"Loop error: {type(e).__name__}: {str(e)[:100]}")
+            if DEBUG:
+                traceback.print_exc()
             if error_count >= MAX_ERRORS_BEFORE_RESTART:
                 safe_print("Too many errors — exiting to allow supervisor to restart.")
                 break
@@ -294,8 +298,9 @@ def main_loop():
     safe_print("Realtime bot stopping.")
     try:
         conn.close()
-    except Exception:
-        pass
+    finally:
+        if 'conn' in locals() and conn:
+            conn.close()
 
 if __name__ == "__main__":
     main_loop()
