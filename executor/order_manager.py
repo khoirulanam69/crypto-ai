@@ -16,6 +16,8 @@ class OrderManager:
     def __init__(self, testnet: bool = False):
         self.testnet = testnet
         self.mode = os.getenv("MODE", "paper")
+
+        self.debug = os.getenv("DEBUG", "false").lower() == "true"
         
         # Rate limiting
         self.last_request_time = 0
