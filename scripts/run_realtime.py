@@ -75,6 +75,39 @@ def log_trade(conn, side, symbol, amount, price, mode, note=""):
     )
     conn.commit()
 
+def get_price_with_fallback(om, symbol, max_retries=3):
+    """Get price with multiple fallback methods"""
+    for attempt in range(1, max_retries + 1):
+        try:
+            # Method 1: get_ticker if available
+            if hasattr(om, "get_ticker"):
+                ticker = om._safe_request(om.get_ticker, symbol) if hasattr(om, "_safe_request") else om.get_ticker(symbol)
+                if isinstance(ticker, dict) and "last" in ticker:
+                    return float(ticker["last"])
+            
+            # Method 2: fetch_ticker directly
+            ticker = om.exchange.fetch_ticker(symbol)
+            return float(ticker["last"])
+            
+        except ccxt.RequestTimeout:
+            if attempt < max_retries:
+                safe_print(f"Price fetch timeout, retry {attempt}/{max_retries}")
+                time.sleep(2 * attempt)
+                continue
+        except Exception as e:
+            if attempt < max_retries:
+                safe_print(f"Price fetch error: {e}, retry {attempt}/{max_retries}")
+                time.sleep(2 * attempt)
+                continue
+    
+    # Final fallback: Use OHLCV
+    try:
+        ohlcv = om.exchange.fetch_ohlcv(symbol, '1m', 2)
+        return float(ohlcv[-1][4])
+    except:
+        # Return last known price or 0
+        return 0.0
+
 def safe_print(*a, **k):
     print(f"[{datetime.now().isoformat()}]", *a, **k)
 
@@ -86,6 +119,19 @@ def main_loop():
     proxy_mgr = ProxyManager()
     # create order manager (this should use resolver/proxy inside)
     om = OrderManager()
+
+    # CONNECTION TEST
+    safe_print("Testing exchange connection...")
+    if not hasattr(om, 'test_connection'):
+        safe_print("Warning: test_connection method not available")
+    else:
+        connection_ok = om.test_connection()
+        if not connection_ok:
+            safe_print("❌ Connection test failed. Retrying in 30 seconds...")
+            time.sleep(30)
+            # Optionally restart or exit
+            return
+
     # =========================
     # INIT AI ENSEMBLE (ONE TIME)
     # =========================
@@ -113,15 +159,7 @@ def main_loop():
 
             # fetch latest price via a safe call
             # prefer using order manager or exchange wrapper that returns ticker
-            if hasattr(om, "get_ticker"):
-                ticker = om._safe_request(om.get_ticker, SYMBOL) if hasattr(om, "_safe_request") else om.get_ticker(SYMBOL)
-                price = float(ticker.get("last") if isinstance(ticker, dict) and "last" in ticker else ticker)
-            else:
-                # try fetch_ohlcv fallback: use latest close
-                ohlcv = om._safe_request(om.fetch_ohlcv, SYMBOL, '1m', 2) if hasattr(om, "_safe_request") else om.fetch_ohlcv(SYMBOL, '1m', 2)
-                # ohlcv: list of lists
-                price = float(ohlcv[-1][4])
-
+            price = get_price_with_fallback(om, SYMBOL)
             safe_print("Price:", price)
 
             # =========================

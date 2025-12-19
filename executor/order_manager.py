@@ -57,13 +57,20 @@ class OrderManager:
         self.exchange = ccxt.binance({
             "apiKey": api_key,
             "secret": secret,
-            "enableRateLimit": True,  # ✅ Use CCXT's built-in rate limiter
-            "timeout": 20000,
+            "enableRateLimit": True,
+            "timeout": 30000,  # 30 seconds (default 10000)
+            "rateLimit": 1000,  # requests per minute
             "options": {
                 "adjustForTimeDifference": True,
-                "recvWindow": 10000,
+                "recvWindow": 60000,  # 60 seconds
+                "defaultType": "spot",
             },
+            "headers": {
+                "User-Agent": "crypto-ai-bot/1.0"
+            }
         })
+        self.exchange.aiohttp_trust_env = True  # Allow proxy from env
+        self.exchange.verbose = DEBUG  # Debug mode
 
         # ======================
         # TIME SYNC (CRITICAL)
@@ -111,17 +118,36 @@ class OrderManager:
 
         for attempt in range(1, retries + 1):
             try:
-                self._enforce_rate_limit()  # ✅ Apply rate limit
+                self._enforce_rate_limit()
                 return func(*args, **kwargs)
+
+            except ccxt.RequestTimeout as e:  # ✅ TAMBAH SPECIFIC EXCEPTION
+                last_exc = e
+                logger.warning(f"[RequestTimeout retry {attempt}/{retries}] {str(e)[:100]}")
+                
+                # Increase timeout untuk attempt berikutnya
+                if attempt < retries:
+                    self.exchange.timeout = min(60000, self.exchange.timeout + 10000)  # max 60s
+                    logger.info(f"Increased timeout to {self.exchange.timeout}ms")
+                
+                # Rotate proxy
+                try:
+                    proxy = self.proxy_manager.get_working_proxy()
+                    self._apply_proxy(proxy)
+                    logger.info(f"Proxy rotated due to timeout: {proxy}")
+                except Exception as proxy_error:
+                    logger.error(f"Proxy rotation failed: {proxy_error}")
+                
+                time.sleep(backoff * attempt * 2)  # Longer sleep for timeouts
 
             except ccxt.NetworkError as e:
                 last_exc = e
                 logger.warning(f"[NetworkError retry {attempt}/{retries}] {type(e).__name__}")
-                # Rotate proxy on network error
+                
                 try:
                     proxy = self.proxy_manager.get_working_proxy()
                     self._apply_proxy(proxy)
-                    logger.info(f"Proxy rotated to: {proxy}")
+                    logger.info(f"Proxy rotated: {proxy}")
                 except Exception as proxy_error:
                     logger.error(f"Proxy rotation failed: {proxy_error}")
                 
@@ -347,3 +373,38 @@ class OrderManager:
             symbol,
             size
         )
+
+    def test_connection(self, max_attempts=3):
+        """Test connection to exchange with retry"""
+        for attempt in range(1, max_attempts + 1):
+            try:
+                logger.info(f"Connection test attempt {attempt}/{max_attempts}")
+                
+                # Test 1: Fetch time (lightweight)
+                server_time = self.exchange.fetch_time()
+                logger.info(f"✓ Server time: {server_time}")
+                
+                # Test 2: Fetch ticker
+                test_symbol = "BTC/USDT"
+                ticker = self.exchange.fetch_ticker(test_symbol)
+                logger.info(f"✓ Ticker {test_symbol}: ${ticker['last']}")
+                
+                # Test 3: Check if authenticated
+                if self.exchange.check_required_credentials():
+                    logger.info("✓ API credentials valid")
+                
+                logger.info("✅ All connection tests passed")
+                return True
+                
+            except ccxt.RequestTimeout as e:
+                logger.warning(f"Connection timeout (attempt {attempt}): {e}")
+                if attempt < max_attempts:
+                    time.sleep(5 * attempt)
+                    # Try with different timeout
+                    self.exchange.timeout = min(60000, 20000 + (attempt * 10000))
+            except Exception as e:
+                logger.error(f"Connection test failed: {type(e).__name__}: {e}")
+                return False
+        
+        logger.error("❌ All connection tests failed")
+        return False
