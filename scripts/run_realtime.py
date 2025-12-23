@@ -24,6 +24,7 @@ from executor.position_tracker import PositionTracker
 from ai.memory.replay_buffer import ReplayBuffer
 from ai.memory.online_trainer import fine_tune
 from risk.risk_engine import RiskEngine
+from utils.logger import setup_logger, MetricsCollector
 
 tracker = PositionTracker()
 replay = ReplayBuffer()
@@ -41,11 +42,15 @@ stop_requested = False
 
 def signal_handler(signum, frame):
     global stop_requested
-    print(f"[run_realtime] Signal {signum} received — stopping gracefully...")
+    logger.info(f"Signal {signum} received — stopping gracefully...")
     stop_requested = True
 
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
+
+# Initialize logger
+logger = setup_logger(__name__)
+metrics = MetricsCollector()
 
 # lightweight DB helper
 def init_db(path=DB_PATH):
@@ -60,18 +65,20 @@ def init_db(path=DB_PATH):
         amount REAL,
         price REAL,
         mode TEXT,
-        note TEXT
+        note TEXT,
+        equity REAL,
+        reward REAL
     )
     """)
     conn.commit()
     return conn
 
-def log_trade(conn, side, symbol, amount, price, mode, note=""):
+def log_trade(conn, side, symbol, amount, price, mode, note="", equity=None, reward=None):
     ts = datetime.utcnow().isoformat()
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO trades (ts, side, symbol, amount, price, mode, note) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (ts, side, symbol, amount, price, mode, note)
+        "INSERT INTO trades (ts, side, symbol, amount, price, mode, note, equity, reward) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (ts, side, symbol, amount, price, mode, note, equity, reward)
     )
     conn.commit()
 
@@ -89,14 +96,9 @@ def get_price_with_fallback(om, symbol, max_retries=3):
             ticker = om.exchange.fetch_ticker(symbol)
             return float(ticker["last"])
             
-        except ccxt.RequestTimeout:
-            if attempt < max_retries:
-                safe_print(f"Price fetch timeout, retry {attempt}/{max_retries}")
-                time.sleep(2 * attempt)
-                continue
         except Exception as e:
             if attempt < max_retries:
-                safe_print(f"Price fetch error: {e}, retry {attempt}/{max_retries}")
+                logger.warning(f"Price fetch error: {e}, retry {attempt}/{max_retries}")
                 time.sleep(2 * attempt)
                 continue
     
@@ -106,42 +108,65 @@ def get_price_with_fallback(om, symbol, max_retries=3):
         return float(ohlcv[-1][4])
     except:
         # Return last known price or 0
+        logger.error("All price fetch methods failed")
         return 0.0
-
-def safe_print(*a, **k):
-    print(f"[{datetime.now().isoformat()}]", *a, **k)
 
 def main_loop():
     last_equity = None
     step_counter = 0
-    safe_print("Starting realtime bot (paper=%s)..." % PAPER)
+    logger.info(f"Starting realtime bot (paper={PAPER})...")
+    
     # create proxy manager (it auto-loads PROXIES from env if set)
     proxy_mgr = ProxyManager()
+    
     # create order manager (this should use resolver/proxy inside)
     om = OrderManager()
 
     # CONNECTION TEST
-    safe_print("Testing exchange connection...")
+    logger.info("Testing exchange connection...")
     if not hasattr(om, 'test_connection'):
-        safe_print("Warning: test_connection method not available")
+        logger.warning("test_connection method not available")
     else:
         connection_ok = om.test_connection()
         if not connection_ok:
-            safe_print("❌ Connection test failed. Retrying in 30 seconds...")
+            logger.error("Connection test failed. Retrying in 30 seconds...")
             time.sleep(30)
             # Optionally restart or exit
             return
 
     # =========================
-    # INIT AI ENSEMBLE (ONE TIME)
+    # INIT AI ENSEMBLE
     # =========================
-    ensemble = EnsembleAggregator([
-        RuleBased()
-    ])
+    # Get ensemble configuration from environment
+    ENABLE_PPO_TREND = os.getenv("ENABLE_PPO_TREND", "true").lower() == "true"
+    ENABLE_PPO_MEAN = os.getenv("ENABLE_PPO_MEAN", "true").lower() == "true"
+    ENABLE_LSTM = os.getenv("ENABLE_LSTM", "true").lower() == "true"
+    ENABLE_RULE = os.getenv("ENABLE_RULE", "true").lower() == "true"
+    
+    ensemble_models = []
+    if ENABLE_RULE:
+        ensemble_models.append(RuleBased())
+        logger.info("RuleBased model enabled")
+    if ENABLE_PPO_TREND:
+        ensemble_models.append(PPOTrend())
+        logger.info("PPOTrend model enabled")
+    if ENABLE_PPO_MEAN:
+        ensemble_models.append(PPOMean())
+        logger.info("PPOMean model enabled")
+    if ENABLE_LSTM:
+        ensemble_models.append(LSTMPrice())
+        logger.info("LSTMPrice model enabled")
+    
+    if not ensemble_models:
+        logger.error("No AI models enabled! Check your ENABLE_* environment variables.")
+        return
+    
+    ensemble = EnsembleAggregator(ensemble_models)
+    logger.info(f"Ensemble initialized with {len(ensemble_models)} models")
 
     # ensure safe_request helper exists on om
     if not hasattr(om, "_safe_request"):
-        safe_print("Warning: OrderManager._safe_request not found — some requests may not retry properly.")
+        logger.warning("OrderManager._safe_request not found — some requests may not retry properly.")
 
     conn = init_db()
 
@@ -153,14 +178,13 @@ def main_loop():
             # pick a working proxy and apply if needed (OrderManager may already do this)
             proxy = proxy_mgr.get_working_proxy()
             if proxy:
-                safe_print("[proxy] using", proxy)
+                logger.debug(f"Using proxy: {proxy}")
             else:
-                safe_print("[proxy] none (direct)")
+                logger.debug("No proxy (direct connection)")
 
             # fetch latest price via a safe call
-            # prefer using order manager or exchange wrapper that returns ticker
             price = get_price_with_fallback(om, SYMBOL)
-            safe_print("Price:", price)
+            logger.info(f"Current price: {price}")
 
             # =========================
             # AI ENSEMBLE DECISION
@@ -169,9 +193,14 @@ def main_loop():
             # ambil OHLCV window untuk AI
             WINDOW = int(os.getenv("AI_WINDOW", "50"))
 
-            ohlcv = om._safe_request(
-                om.fetch_ohlcv, SYMBOL, '1m', WINDOW
-            ) if hasattr(om, "_safe_request") else om.fetch_ohlcv(SYMBOL, '1m', WINDOW)
+            try:
+                ohlcv = om._safe_request(
+                    om.fetch_ohlcv, SYMBOL, '1m', WINDOW
+                ) if hasattr(om, "_safe_request") else om.fetch_ohlcv(SYMBOL, '1m', WINDOW)
+            except Exception as e:
+                logger.error(f"Failed to fetch OHLCV: {e}")
+                time.sleep(SLEEP_SECONDS)
+                continue
 
             # build state (samakan dengan ExchangeEnv)
             closes = [c[4] for c in ohlcv]
@@ -184,10 +213,17 @@ def main_loop():
                 window_norm = window / mean_val
 
             if step_counter % 5 == 0 or balance is None:
-                balance = om.exchange.fetch_balance()
+                try:
+                    balance = om.exchange.fetch_balance()
+                except Exception as e:
+                    logger.error(f"Failed to fetch balance: {e}")
+                    # Use last balance if available
+                    if balance is None:
+                        time.sleep(SLEEP_SECONDS)
+                        continue
 
-            usdt = balance['free'].get('USDT', 0)
-            btc = balance['free'].get('BTC', 0)
+            usdt = balance['free'].get('USDT', 0) if balance else 0
+            btc = balance['free'].get('BTC', 0) if balance else 0
 
             portfolio_value = usdt + btc * price + 1e-9
             if portfolio_value < 1e-9:
@@ -199,13 +235,18 @@ def main_loop():
             state = np.concatenate([window_norm, [cash_ratio, pos_ratio]]).astype(np.float32)
 
             # AI decision
-            raw_action = ensemble.decide(state)
+            try:
+                raw_action = ensemble.decide(state)
+                logger.debug(f"Raw AI decision: {raw_action}")
+            except Exception as e:
+                logger.error(f"AI decision failed: {e}")
+                raw_action = 1  # Default to HOLD on error
 
             # =========================
             # RISK MANAGEMENT GATE
             # =========================
 
-            equity = om.get_equity(SYMBOL)
+            equity = om.get_equity(SYMBOL) if hasattr(om, 'get_equity') else portfolio_value
 
             risk_decision = risk_engine.evaluate(
                 signal=raw_action,
@@ -224,7 +265,7 @@ def main_loop():
 
             action = risk_decision["action"]
 
-            safe_print(f"[RISK] Decision → {action}")
+            logger.info(f"Risk Decision → {action}")
 
             if action == "BUY":
                 size = risk_decision["size"]
@@ -232,52 +273,80 @@ def main_loop():
                 if PAPER:
                     exec_price = price
                     exec_amount = size
-                    safe_print(f"[PAPER BUY] {exec_amount} @ {exec_price}")
+                    logger.info(f"[PAPER BUY] {exec_amount} @ {exec_price}")
                 else:
-                    res = om.market_buy(SYMBOL, size)
-                    exec_price = res.get("price", price)
-                    exec_amount = res.get("amount", size)
+                    try:
+                        res = om.market_buy(SYMBOL, size)
+                        exec_price = res.get("price", price)
+                        exec_amount = res.get("amount", size)
+                        logger.info(f"[LIVE BUY] {exec_amount} @ {exec_price}")
+                    except Exception as e:
+                        logger.error(f"Buy execution failed: {e}")
+                        exec_price = price
+                        exec_amount = 0
 
-                tracker.update_from_trade({
-                    "side": "buy",
-                    "amount": exec_amount,
-                    "price": exec_price
-                })
+                if exec_amount > 0:
+                    tracker.update_from_trade({
+                        "side": "buy",
+                        "amount": exec_amount,
+                        "price": exec_price
+                    })
 
-                log_trade(conn, "BUY", SYMBOL, exec_amount, exec_price,
-                        "paper" if PAPER else "live", note="risk_engine")
+                    log_trade(conn, "BUY", SYMBOL, exec_amount, exec_price,
+                            "paper" if PAPER else "live", note="risk_engine", 
+                            equity=equity, reward=reward)
 
             elif action == "SELL":
                 size = tracker.position_size()
 
                 if size <= 0:
-                    safe_print("[RISK] SELL ignored — no position")
+                    logger.warning("SELL ignored — no position")
                 else:
                     if PAPER:
                         exec_price = price
                         exec_amount = size
-                        safe_print(f"[PAPER SELL] {exec_amount} @ {exec_price}")
+                        logger.info(f"[PAPER SELL] {exec_amount} @ {exec_price}")
                     else:
-                        res = om.market_sell(SYMBOL, size)
-                        exec_price = res.get("price", price)
-                        exec_amount = res.get("amount", size)
+                        try:
+                            res = om.market_sell(SYMBOL, size)
+                            exec_price = res.get("price", price)
+                            exec_amount = res.get("amount", size)
+                            logger.info(f"[LIVE SELL] {exec_amount} @ {exec_price}")
+                        except Exception as e:
+                            logger.error(f"Sell execution failed: {e}")
+                            exec_price = price
+                            exec_amount = 0
 
-                    tracker.update_from_trade({
-                        "side": "sell",
-                        "amount": exec_amount,
-                        "price": exec_price
-                    })
+                    if exec_amount > 0:
+                        tracker.update_from_trade({
+                            "side": "sell",
+                            "amount": exec_amount,
+                            "price": exec_price
+                        })
 
-                    risk_engine.on_position_closed()
+                        risk_engine.on_position_closed()
 
-                    log_trade(conn, "SELL", SYMBOL, exec_amount, exec_price,
-                            "paper" if PAPER else "live", note="risk_engine")
+                        log_trade(conn, "SELL", SYMBOL, exec_amount, exec_price,
+                                "paper" if PAPER else "live", note="risk_engine",
+                                equity=equity, reward=reward)
 
             else:
-                safe_print("[RISK] HOLD")
+                logger.debug("HOLD - No action taken")
 
-            safe_print(f"Equity: {equity:.2f}", "| Cash:", round(om.state.state["cash"], 2), "| Position:", round(om.state.state["position"], 6))
-            safe_print(f"Reward: {reward:.2f}", f"| Portfolio Value: {portfolio_value:.2f}")
+            # Log metrics
+            cash = om.state.state["cash"] if hasattr(om, 'state') else usdt
+            position = om.state.state["position"] if hasattr(om, 'state') else btc
+            logger.info(f"Equity: {equity:.2f} | Cash: {cash:.2f} | Position: {position:.6f}")
+            logger.info(f"Reward: {reward:.2f} | Portfolio Value: {portfolio_value:.2f}")
+            
+            # Collect metrics
+            metrics.record_trade_step(
+                price=price,
+                action=action,
+                equity=equity,
+                reward=reward,
+                portfolio_value=portfolio_value
+            )
 
             # =========================
             # SAVE EXPERIENCE
@@ -306,17 +375,18 @@ def main_loop():
                 if step_counter % FINE_TUNE_EVERY == 0:
                     if replay.size() > MAX_REPLAY_SIZE:
                         replay.trim_oldest(MAX_REPLAY_SIZE // 2)
+                        logger.info(f"Replay buffer trimmed to {MAX_REPLAY_SIZE // 2} samples")
                     elif replay.size() < MIN_REPLAY_SIZE:
-                        safe_print("[AI] Skip fine-tune: replay buffer too small")
+                        logger.info("Skip fine-tune: replay buffer too small")
                     elif not risk_engine.allow_training(equity):
-                        safe_print("[AI] Skip fine-tune: drawdown too high")
+                        logger.warning("Skip fine-tune: drawdown too high")
                     else:
-                        safe_print("[AI] Online learning triggered...")
+                        logger.info("Online learning triggered...")
                         try:
                             fine_tune()
-                            safe_print("[AI] Fine-tune completed")
+                            logger.info("Fine-tune completed successfully")
                         except Exception as e:
-                            safe_print("[AI] Fine-tune failed:", e)
+                            logger.error(f"Fine-tune failed: {e}")
 
             # reset error counter & sleep
             error_count = 0
@@ -324,17 +394,21 @@ def main_loop():
 
         except Exception as e:
             error_count += 1
-            safe_print(f"Loop error: {type(e).__name__}: {str(e)[:100]}")
+            logger.error(f"Loop error: {type(e).__name__}: {str(e)[:100]}")
             if DEBUG:
-                traceback.print_exc()
+                logger.error(traceback.format_exc())
             if error_count >= MAX_ERRORS_BEFORE_RESTART:
-                safe_print("Too many errors — exiting to allow supervisor to restart.")
+                logger.error("Too many errors — exiting to allow supervisor to restart.")
                 break
-            # small backoff
-            time.sleep(min(60, 5 * error_count))
+            # exponential backoff
+            backoff_time = min(60, 5 * (2 ** (error_count - 1)))
+            logger.info(f"Backing off for {backoff_time} seconds...")
+            time.sleep(backoff_time)
 
-    safe_print("Realtime bot stopping.")
+    logger.info("Realtime bot stopping.")
     try:
+        # Save final metrics
+        metrics.save_summary()
         conn.close()
     finally:
         if 'conn' in locals() and conn:
