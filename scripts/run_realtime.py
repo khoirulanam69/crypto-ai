@@ -457,16 +457,17 @@ def main_loop():
             logger.info(f"Equity: ${equity:,.2f} | Cash: ${cash:,.2f} | Position: {position:.6f} BTC (${position * price:,.2f})")
             logger.info(f"Reward: {reward:+.2f}% | Portfolio Value: ${portfolio_value:,.2f}")
             
-            # Collect metrics
-            metrics.record_trade_step(
-                price=price,
-                action=action,
-                equity=equity,
-                reward=reward,
-                portfolio_value=portfolio_value,
-                cash=cash,
-                position=position
-            )
+            # Collect metrics - PERBAIKAN: hanya gunakan parameter yang diperlukan
+            try:
+                metrics.record_trade_step(
+                    price=price,
+                    action=action,
+                    equity=equity,
+                    reward=reward,
+                    portfolio_value=portfolio_value
+                )
+            except Exception as e:
+                logger.error(f"Failed to record metrics: {e}")
 
             # =========================
             # SAVE EXPERIENCE
