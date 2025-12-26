@@ -67,18 +67,20 @@ def init_db(path=DB_PATH):
         mode TEXT,
         note TEXT,
         equity REAL,
-        reward REAL
+        reward REAL,
+        cash REAL,
+        position REAL
     )
     """)
     conn.commit()
     return conn
 
-def log_trade(conn, side, symbol, amount, price, mode, note="", equity=None, reward=None):
+def log_trade(conn, side, symbol, amount, price, mode, note="", equity=None, reward=None, cash=None, position=None):
     ts = datetime.utcnow().isoformat()
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO trades (ts, side, symbol, amount, price, mode, note, equity, reward) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (ts, side, symbol, amount, price, mode, note, equity, reward)
+        "INSERT INTO trades (ts, side, symbol, amount, price, mode, note, equity, reward, cash, position) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (ts, side, symbol, amount, price, mode, note, equity, reward, cash, position)
     )
     conn.commit()
 
@@ -89,13 +91,24 @@ def get_price_with_fallback(om, symbol, max_retries=3):
             # Method 1: get_ticker if available
             if hasattr(om, "get_ticker"):
                 ticker = om._safe_request(om.get_ticker, symbol) if hasattr(om, "_safe_request") else om.get_ticker(symbol)
-                if isinstance(ticker, dict) and "last" in ticker:
-                    return float(ticker["last"])
+                if isinstance(ticker, dict):
+                    # Handle missing volume field
+                    if "last" in ticker:
+                        price = float(ticker["last"])
+                        # Log warning if volume is missing but not critical
+                        if "volume" not in ticker and attempt == 1:
+                            logger.debug(f"Volume field missing in ticker, but price retrieved: {price}")
+                        return price
             
             # Method 2: fetch_ticker directly
             ticker = om.exchange.fetch_ticker(symbol)
-            return float(ticker["last"])
-            
+            if isinstance(ticker, dict) and "last" in ticker:
+                price = float(ticker["last"])
+                # Log warning if volume is missing but not critical
+                if "volume" not in ticker and attempt == 1:
+                    logger.debug(f"Volume field missing in ticker, but price retrieved: {price}")
+                return price
+                
         except Exception as e:
             if attempt < max_retries:
                 logger.warning(f"Price fetch error: {e}, retry {attempt}/{max_retries}")
@@ -105,11 +118,14 @@ def get_price_with_fallback(om, symbol, max_retries=3):
     # Final fallback: Use OHLCV
     try:
         ohlcv = om.exchange.fetch_ohlcv(symbol, '1m', 2)
-        return float(ohlcv[-1][4])
-    except:
-        # Return last known price or 0
-        logger.error("All price fetch methods failed")
-        return 0.0
+        if len(ohlcv) >= 2:
+            return float(ohlcv[-1][4])
+    except Exception as e:
+        logger.error(f"OHLCV fallback also failed: {e}")
+    
+    # Return last known price or 0
+    logger.error("All price fetch methods failed")
+    return 0.0
 
 def create_ai_model(model_class, model_name, **kwargs):
     """Helper function to create AI model with error handling"""
@@ -120,6 +136,21 @@ def create_ai_model(model_class, model_name, **kwargs):
     except Exception as e:
         logger.error(f"Failed to load {model_name}: {e}")
         return None
+
+def get_balance_with_retry(om, max_retries=3):
+    """Get balance with retry logic"""
+    for attempt in range(max_retries):
+        try:
+            balance = om.exchange.fetch_balance()
+            if balance and 'free' in balance:
+                return balance
+        except Exception as e:
+            if attempt < max_retries - 1:
+                logger.warning(f"Balance fetch failed (attempt {attempt+1}/{max_retries}): {e}")
+                time.sleep(2 * (attempt + 1))
+            else:
+                logger.error(f"Balance fetch failed after {max_retries} attempts: {e}")
+    return None
 
 def main_loop():
     last_equity = None
@@ -142,10 +173,10 @@ def main_loop():
             if not connection_ok:
                 logger.error("Connection test failed. Retrying in 30 seconds...")
                 time.sleep(30)
-                # Optionally restart or exit
                 return
         except Exception as e:
             logger.error(f"Connection test error: {e}")
+            # Continue anyway, might be a temporary issue
 
     # =========================
     # INIT AI ENSEMBLE
@@ -197,23 +228,29 @@ def main_loop():
         logger.error(f"Failed to initialize ensemble: {e}")
         return
 
-    # ensure safe_request helper exists on om
-    if not hasattr(om, "_safe_request"):
-        logger.warning("OrderManager._safe_request not found — some requests may not retry properly.")
-
     conn = init_db()
 
     error_count = 0
     balance = None
+    usdt_balance = 0.0
+    btc_balance = 0.0
+
+    # Get initial balance
+    try:
+        balance = get_balance_with_retry(om)
+        if balance:
+            usdt_balance = balance['free'].get('USDT', 0)
+            btc_balance = balance['free'].get('BTC', 0)
+            logger.info(f"Initial balance - USDT: {usdt_balance:.2f}, BTC: {btc_balance:.6f}")
+    except Exception as e:
+        logger.error(f"Failed to get initial balance: {e}")
 
     while not stop_requested:
         try:
-            # pick a working proxy and apply if needed (OrderManager may already do this)
+            # pick a working proxy and apply if needed
             proxy = proxy_mgr.get_working_proxy()
             if proxy:
                 logger.debug(f"Using proxy: {proxy}")
-            else:
-                logger.debug("No proxy (direct connection)")
 
             # fetch latest price via a safe call
             price = get_price_with_fallback(om, SYMBOL)
@@ -222,19 +259,21 @@ def main_loop():
                 time.sleep(SLEEP_SECONDS)
                 continue
                 
-            logger.info(f"Current price: {price}")
+            logger.info(f"Current price: ${price:,.2f}")
 
             # =========================
             # AI ENSEMBLE DECISION
             # =========================
 
-            # ambil OHLCV window untuk AI
+            # Get OHLCV window untuk AI
             WINDOW = int(os.getenv("AI_WINDOW", "50"))
 
             try:
-                ohlcv = om._safe_request(
-                    om.fetch_ohlcv, SYMBOL, '1m', WINDOW
-                ) if hasattr(om, "_safe_request") else om.fetch_ohlcv(SYMBOL, '1m', WINDOW)
+                if hasattr(om, "_safe_request"):
+                    ohlcv = om._safe_request(om.fetch_ohlcv, SYMBOL, '1m', WINDOW)
+                else:
+                    ohlcv = om.fetch_ohlcv(SYMBOL, '1m', WINDOW)
+                    
                 if len(ohlcv) < WINDOW:
                     logger.warning(f"OHLCV data insufficient: {len(ohlcv)}/{WINDOW}")
                     time.sleep(SLEEP_SECONDS)
@@ -254,25 +293,27 @@ def main_loop():
             else:
                 window_norm = window / mean_val
 
-            if step_counter % 5 == 0 or balance is None:
+            # Update balance periodically
+            if step_counter % 10 == 0 or balance is None:  # Update every 10 cycles
                 try:
-                    balance = om.exchange.fetch_balance()
+                    balance = get_balance_with_retry(om)
+                    if balance:
+                        usdt_balance = balance['free'].get('USDT', 0)
+                        btc_balance = balance['free'].get('BTC', 0)
                 except Exception as e:
-                    logger.error(f"Failed to fetch balance: {e}")
-                    # Use last balance if available
-                    if balance is None:
-                        time.sleep(SLEEP_SECONDS)
-                        continue
+                    logger.warning(f"Balance update failed: {e}")
 
-            usdt = balance['free'].get('USDT', 0) if balance else 0
-            btc = balance['free'].get('BTC', 0) if balance else 0
-
-            portfolio_value = usdt + btc * price + 1e-9
+            portfolio_value = usdt_balance + btc_balance * price + 1e-9
             if portfolio_value < 1e-9:
                 cash_ratio = 0.0
             else:
-                cash_ratio = usdt / portfolio_value
-            pos_ratio = btc
+                cash_ratio = usdt_balance / portfolio_value
+            
+            # Use actual position size from tracker if available
+            if tracker.has_position():
+                pos_ratio = tracker.position_size()
+            else:
+                pos_ratio = btc_balance
 
             state = np.concatenate([window_norm, [cash_ratio, pos_ratio]]).astype(np.float32)
 
@@ -291,7 +332,10 @@ def main_loop():
             # =========================
 
             try:
-                equity = om.get_equity(SYMBOL) if hasattr(om, 'get_equity') else portfolio_value
+                if hasattr(om, 'get_equity'):
+                    equity = om.get_equity(SYMBOL)
+                else:
+                    equity = portfolio_value
             except Exception as e:
                 logger.error(f"Failed to get equity: {e}")
                 equity = portfolio_value
@@ -313,40 +357,53 @@ def main_loop():
             # MEMORY REWARD
             # =========================
             reward = 0.0
-            if last_equity is not None:
-                reward = equity - last_equity
+            if last_equity is not None and last_equity != 0:
+                reward = (equity - last_equity) / last_equity * 100  # Reward as percentage
 
             action = risk_decision.get("action", "HOLD")
             size = risk_decision.get("size", 0)
 
-            logger.info(f"Risk Decision → {action} (size: {size})")
+            logger.info(f"Risk Decision → {action} (size: {size:.6f} BTC)")
 
             if action == "BUY" and size > 0:
-                if PAPER:
-                    exec_price = price
-                    exec_amount = size
-                    logger.info(f"[PAPER BUY] {exec_amount} @ {exec_price}")
-                else:
-                    try:
-                        res = om.market_buy(SYMBOL, size)
-                        exec_price = res.get("price", price)
-                        exec_amount = res.get("amount", size)
-                        logger.info(f"[LIVE BUY] {exec_amount} @ {exec_price}")
-                    except Exception as e:
-                        logger.error(f"Buy execution failed: {e}")
+                # Ensure we have enough USDT
+                if usdt_balance < size * price * 1.01:  # Include 1% buffer for fees
+                    logger.warning(f"Insufficient USDT for BUY. Need: {size * price * 1.01:.2f}, Have: {usdt_balance:.2f}")
+                    size = min(size, usdt_balance / price * 0.99)  # Adjust size
+                    if size <= 0:
+                        logger.warning("Adjusted size is zero or negative, skipping BUY")
+                        action = "HOLD"
+                
+                if action == "BUY" and size > 0:
+                    if PAPER:
                         exec_price = price
-                        exec_amount = 0
+                        exec_amount = size
+                        logger.info(f"[PAPER BUY] {exec_amount:.6f} BTC @ ${exec_price:,.2f} (${exec_amount * exec_price:,.2f})")
+                        
+                        # Update paper balances
+                        usdt_balance -= exec_amount * exec_price
+                        btc_balance += exec_amount
+                    else:
+                        try:
+                            res = om.market_buy(SYMBOL, size)
+                            exec_price = res.get("price", price)
+                            exec_amount = res.get("amount", size)
+                            logger.info(f"[LIVE BUY] {exec_amount:.6f} BTC @ ${exec_price:,.2f} (${exec_amount * exec_price:,.2f})")
+                        except Exception as e:
+                            logger.error(f"Buy execution failed: {e}")
+                            exec_price = price
+                            exec_amount = 0
 
-                if exec_amount > 0:
-                    tracker.update_from_trade({
-                        "side": "buy",
-                        "amount": exec_amount,
-                        "price": exec_price
-                    })
+                    if exec_amount > 0:
+                        tracker.update_from_trade({
+                            "side": "buy",
+                            "amount": exec_amount,
+                            "price": exec_price
+                        })
 
-                    log_trade(conn, "BUY", SYMBOL, exec_amount, exec_price,
-                            "paper" if PAPER else "live", note="risk_engine", 
-                            equity=equity, reward=reward)
+                        log_trade(conn, "BUY", SYMBOL, exec_amount, exec_price,
+                                "paper" if PAPER else "live", note="risk_engine", 
+                                equity=equity, reward=reward, cash=usdt_balance, position=btc_balance)
 
             elif action == "SELL":
                 position_size = tracker.position_size()
@@ -357,13 +414,17 @@ def main_loop():
                     if PAPER:
                         exec_price = price
                         exec_amount = position_size
-                        logger.info(f"[PAPER SELL] {exec_amount} @ {exec_price}")
+                        logger.info(f"[PAPER SELL] {exec_amount:.6f} BTC @ ${exec_price:,.2f} (${exec_amount * exec_price:,.2f})")
+                        
+                        # Update paper balances
+                        usdt_balance += exec_amount * exec_price
+                        btc_balance -= exec_amount
                     else:
                         try:
                             res = om.market_sell(SYMBOL, position_size)
                             exec_price = res.get("price", price)
                             exec_amount = res.get("amount", position_size)
-                            logger.info(f"[LIVE SELL] {exec_amount} @ {exec_price}")
+                            logger.info(f"[LIVE SELL] {exec_amount:.6f} BTC @ ${exec_price:,.2f} (${exec_amount * exec_price:,.2f})")
                         except Exception as e:
                             logger.error(f"Sell execution failed: {e}")
                             exec_price = price
@@ -380,21 +441,21 @@ def main_loop():
 
                         log_trade(conn, "SELL", SYMBOL, exec_amount, exec_price,
                                 "paper" if PAPER else "live", note="risk_engine",
-                                equity=equity, reward=reward)
+                                equity=equity, reward=reward, cash=usdt_balance, position=btc_balance)
 
             else:
                 logger.debug("HOLD - No action taken")
 
             # Log metrics
             try:
-                cash = om.state.state["cash"] if hasattr(om, 'state') else usdt
-                position = om.state.state["position"] if hasattr(om, 'state') else btc
+                cash = om.state.state["cash"] if hasattr(om, 'state') and hasattr(om.state, 'state') else usdt_balance
+                position = om.state.state["position"] if hasattr(om, 'state') and hasattr(om.state, 'state') else btc_balance
             except:
-                cash = usdt
-                position = btc
+                cash = usdt_balance
+                position = btc_balance
                 
-            logger.info(f"Equity: {equity:.2f} | Cash: {cash:.2f} | Position: {position:.6f}")
-            logger.info(f"Reward: {reward:.2f} | Portfolio Value: {portfolio_value:.2f}")
+            logger.info(f"Equity: ${equity:,.2f} | Cash: ${cash:,.2f} | Position: {position:.6f} BTC (${position * price:,.2f})")
+            logger.info(f"Reward: {reward:+.2f}% | Portfolio Value: ${portfolio_value:,.2f}")
             
             # Collect metrics
             metrics.record_trade_step(
@@ -402,7 +463,9 @@ def main_loop():
                 action=action,
                 equity=equity,
                 reward=reward,
-                portfolio_value=portfolio_value
+                portfolio_value=portfolio_value,
+                cash=cash,
+                position=position
             )
 
             # =========================
@@ -457,7 +520,7 @@ def main_loop():
             break
         except Exception as e:
             error_count += 1
-            logger.error(f"Loop error: {type(e).__name__}: {str(e)[:100]}")
+            logger.error(f"Loop error: {type(e).__name__}: {str(e)[:200]}")
             if DEBUG:
                 logger.error(traceback.format_exc())
             if error_count >= MAX_ERRORS_BEFORE_RESTART:
@@ -472,6 +535,8 @@ def main_loop():
     try:
         # Save final metrics
         metrics.save_summary()
+        logger.info(f"Final balance - USDT: {usdt_balance:.2f}, BTC: {btc_balance:.6f}")
+        logger.info(f"Total steps executed: {step_counter}")
         conn.close()
     except Exception as e:
         logger.error(f"Error during shutdown: {e}")
