@@ -403,6 +403,16 @@ def main_loop():
             converted_signal = convert_ai_signal_for_risk_engine(raw_action)
             logger.info(f"Signal conversion: AI={raw_action} → RiskEngine={converted_signal:.2f}")
 
+            # DEBUG: Log semua input ke risk engine
+            logger.info(f"=== RISK ENGINE INPUT DEBUG ===")
+            logger.info(f"Signal: {converted_signal:.2f}")
+            logger.info(f"Has position: {tracker.has_position()}")
+            logger.info(f"Position size: {tracker.position_size():.8f} BTC")
+            logger.info(f"Price: ${price:.2f}")
+            logger.info(f"Equity: ${equity:.2f}")
+            logger.info(f"Candles count: {len(ohlcv)}")
+            logger.info(f"=== END RISK ENGINE DEBUG ===")
+
             try:
                 risk_decision = risk_engine.evaluate(
                     signal=converted_signal,
@@ -412,6 +422,11 @@ def main_loop():
                     has_position=tracker.has_position()
                 )
                 logger.debug(f"Risk decision details: {risk_decision}")
+                
+                # DEBUG: Log reason dari risk engine
+                if "reason" in risk_decision:
+                    logger.info(f"Risk Engine Reason: {risk_decision['reason']}")
+                    
             except Exception as e:
                 logger.error(f"Risk engine evaluation failed: {e}")
                 risk_decision = {"action": "HOLD", "size": 0}
