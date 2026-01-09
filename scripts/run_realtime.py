@@ -405,7 +405,7 @@ def main_loop():
 
             try:
                 risk_decision = risk_engine.evaluate(
-                    signal=converted_signal,  # INI YANG BENAR
+                    signal=converted_signal,
                     candles=ohlcv,
                     equity=equity,
                     price=price,

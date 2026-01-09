@@ -240,6 +240,8 @@ class RiskEngine:
         if not candles_valid:
             result_template["reason"] = candles_reason
             return result_template
+
+        logger.info(f"RiskEngine DEBUG: signal={signal:.2f}, has_position={has_position}, equity=${equity:.2f}, price=${price:.2f}")
         
         # =====================
         # DRAWDOWN PROTECTION
@@ -282,6 +284,7 @@ class RiskEngine:
         # EXIT MANAGEMENT
         # =====================
         if has_position:
+            logger.info(f"RiskEngine: In position, checking exits...")
             # Check if position state is consistent
             if not hasattr(self.position, 'size') or self.position.size <= 0:
                 logger.warning("Position state inconsistent with has_position flag")
@@ -331,8 +334,10 @@ class RiskEngine:
             return result_template
         
         # Check buy signal threshold
+        logger.info(f"RiskEngine: Checking buy threshold: signal={signal:.2f} vs threshold={self.buy_threshold}")
         if signal < self.buy_threshold:
             result_template["reason"] = f"SIGNAL_BELOW_THRESHOLD_{signal:.2f}"
+            logger.info(f"RiskEngine: Signal below threshold: {signal:.2f} < {self.buy_threshold}")
             return result_template
         
         # Calculate ATR for volatility-based stops
