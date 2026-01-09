@@ -1,13 +1,11 @@
 # ai/ensemble/rule.py
 import numpy as np
-from .base import BaseModel
 import logging
 
 logger = logging.getLogger(__name__)
 
-class RuleBased(BaseModel):
+class RuleBased:
     def __init__(self):
-        super().__init__()
         self.name = "RuleBased"
         self.last_decision_info = {}
         
@@ -147,14 +145,14 @@ class RuleBased(BaseModel):
             if buy_score > sell_score and buy_score >= 3 and can_buy:
                 decision = 0  # BUY
                 reason = (f"BUY: Strong buy signals (score={buy_score}) | "
-                        f"Deviation: {deviation_from_20*100:.2f}% | "
-                        f"RSI: {rsi:.1f} | Momentum: {momentum_5:.2f}%")
+                         f"Deviation: {deviation_from_20*100:.2f}% | "
+                         f"RSI: {rsi:.1f} | Momentum: {momentum_5:.2f}%")
                 
             elif sell_score > buy_score and sell_score >= 3 and can_sell:
                 decision = 2  # SELL
                 reason = (f"SELL: Strong sell signals (score={sell_score}) | "
-                        f"Deviation: {deviation_from_20*100:.2f}% | "
-                        f"RSI: {rsi:.1f} | Momentum: {momentum_5:.2f}%")
+                         f"Deviation: {deviation_from_20*100:.2f}% | "
+                         f"RSI: {rsi:.1f} | Momentum: {momentum_5:.2f}%")
                 
             else:
                 # Check for weaker signals if no strong signal
@@ -172,8 +170,8 @@ class RuleBased(BaseModel):
                         reason = f"Sell signals (score={sell_score}) but no significant position"
                     else:
                         reason = (f"HOLD: No clear signals | "
-                                f"Buy score: {buy_score}, Sell score: {sell_score} | "
-                                f"Deviation: {deviation_from_20*100:.2f}% | RSI: {rsi:.1f}")
+                                 f"Buy score: {buy_score}, Sell score: {sell_score} | "
+                                 f"Deviation: {deviation_from_20*100:.2f}% | RSI: {rsi:.1f}")
             
             # Store detailed debug info
             self.last_decision_info = {
@@ -212,7 +210,28 @@ class RuleBased(BaseModel):
                 'reason': error_msg
             }
             return 1  # HOLD on error
-
+    
     def get_last_decision_info(self):
         """Get detailed info about the last decision."""
         return self.last_decision_info
+    
+    # Add predict method for compatibility with aggregator if needed
+    def predict(self, state):
+        """
+        Alias for decide() for compatibility with EnsembleAggregator
+        Returns: (action, confidence)
+        """
+        action = self.decide(state)
+        # Calculate confidence based on scores
+        info = self.get_last_decision_info()
+        buy_score = info.get('buy_score', 0)
+        sell_score = info.get('sell_score', 0)
+        
+        if action == 0:  # BUY
+            confidence = min(0.9, buy_score / 10.0) if buy_score > 0 else 0.5
+        elif action == 2:  # SELL
+            confidence = min(0.9, sell_score / 10.0) if sell_score > 0 else 0.5
+        else:  # HOLD
+            confidence = 0.3
+            
+        return action, confidence
