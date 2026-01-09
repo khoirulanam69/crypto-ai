@@ -286,12 +286,19 @@ def main_loop():
             # build state (samakan dengan ExchangeEnv)
             closes = [c[4] for c in ohlcv]
 
+            # DEBUG: Tampilkan data OHLCV
+            logger.debug(f"OHLCV closes (last 5): {closes[-5:]}")
+            logger.debug(f"OHLCV length: {len(closes)}")
+
             window = np.array(closes, dtype=float)
             mean_val = window.mean()
+            std_val = window.std()
             if mean_val == 0:
                 window_norm = window.copy()
             else:
                 window_norm = window / mean_val
+
+            logger.debug(f"Normalized window range: {window_norm.min():.4f} to {window_norm.max():.4f}")
 
             # Update balance periodically
             if step_counter % 10 == 0 or balance is None:  # Update every 10 cycles
@@ -300,6 +307,7 @@ def main_loop():
                     if balance:
                         usdt_balance = balance['free'].get('USDT', 0)
                         btc_balance = balance['free'].get('BTC', 0)
+                        logger.debug(f"Balance updated - USDT: {usdt_balance:.2f}, BTC: {btc_balance:.6f}")
                 except Exception as e:
                     logger.warning(f"Balance update failed: {e}")
 
@@ -312,15 +320,30 @@ def main_loop():
             # Use actual position size from tracker if available
             if tracker.has_position():
                 pos_ratio = tracker.position_size()
+                logger.debug(f"Using tracker position: {pos_ratio:.6f}")
             else:
                 pos_ratio = btc_balance
+                logger.debug(f"Using balance position: {pos_ratio:.6f}")
 
             state = np.concatenate([window_norm, [cash_ratio, pos_ratio]]).astype(np.float32)
+
+            # DEBUG: Tampilkan state details
+            logger.debug(f"State shape: {state.shape}")
+            logger.debug(f"Cash ratio: {cash_ratio:.4f}, Position ratio: {pos_ratio:.6f}")
+            logger.debug(f"State last 5 values: {state[-7:]}")  # Tampilkan 5 nilai terakhir + 2 ratio
 
             # AI decision
             try:
                 raw_action = ensemble.decide(state)
-                logger.debug(f"Raw AI decision: {raw_action}")
+                logger.info(f"Raw AI decision: {raw_action} (type: {type(raw_action)})")
+
+                # DEBUG: Jika menggunakan RuleBased, tampilkan decision details
+                if ENABLE_RULE and len(ensemble_models) > 0:
+                    for i, model in enumerate(ensemble_models):
+                        if hasattr(model, 'get_last_decision_info'):
+                            info = model.get_last_decision_info()
+                            if info:
+                                logger.info(f"Model {i} ({model.__class__.__name__}): {info}")
             except Exception as e:
                 logger.error(f"AI decision failed: {e}")
                 # Default to HOLD (1) on error
@@ -340,6 +363,8 @@ def main_loop():
                 logger.error(f"Failed to get equity: {e}")
                 equity = portfolio_value
 
+            logger.debug(f"Equity: ${equity:.2f}, Has position: {tracker.has_position()}")
+
             try:
                 risk_decision = risk_engine.evaluate(
                     signal=raw_action,
@@ -348,6 +373,7 @@ def main_loop():
                     price=price,
                     has_position=tracker.has_position()
                 )
+                logger.debug(f"Risk decision details: {risk_decision}")
             except Exception as e:
                 logger.error(f"Risk engine evaluation failed: {e}")
                 # Default to HOLD on risk engine error
@@ -362,6 +388,13 @@ def main_loop():
 
             action = risk_decision.get("action", "HOLD")
             size = risk_decision.get("size", 0)
+
+            # Tampilkan reason mengapa HOLD jika terjadi
+            if action == "HOLD":
+                if raw_action == 1:  # Jika AI sudah HOLD
+                    logger.info("AI decided to HOLD")
+                else:
+                    logger.info(f"AI suggested {raw_action} but risk engine decided HOLD")
 
             logger.info(f"Risk Decision → {action} (size: {size:.6f} BTC)")
 
