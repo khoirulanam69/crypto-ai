@@ -285,33 +285,40 @@ def main_loop():
 
             # build state (samakan dengan ExchangeEnv)
             closes = [c[4] for c in ohlcv]
-
-            # DEBUG: Tampilkan data OHLCV
-            logger.debug(f"OHLCV closes (last 5): {closes[-5:]}")
-            logger.debug(f"OHLCV length: {len(closes)}")
+            
+            # DEBUG DETAILED
+            logger.info(f"=== AI DECISION DEBUG ===")
+            logger.info(f"Latest closes (last 10): {[f'{x:.1f}' for x in closes[-10:]]}")
+            logger.info(f"Current price: ${price:,.2f}")
+            logger.info(f"Data points: {len(closes)}")
 
             window = np.array(closes, dtype=float)
             mean_val = window.mean()
             std_val = window.std()
+            logger.info(f"Window stats - Mean: ${mean_val:,.2f}, Std: ${std_val:,.2f}")
+            
             if mean_val == 0:
                 window_norm = window.copy()
             else:
                 window_norm = window / mean_val
-
-            logger.debug(f"Normalized window range: {window_norm.min():.4f} to {window_norm.max():.4f}")
+            
+            logger.info(f"Normalized last value: {window_norm[-1]:.4f}")
+            logger.info(f"Normalized range: min={window_norm.min():.4f}, max={window_norm.max():.4f}")
 
             # Update balance periodically
-            if step_counter % 10 == 0 or balance is None:  # Update every 10 cycles
+            if step_counter % 10 == 0 or balance is None:
                 try:
                     balance = get_balance_with_retry(om)
                     if balance:
                         usdt_balance = balance['free'].get('USDT', 0)
                         btc_balance = balance['free'].get('BTC', 0)
-                        logger.debug(f"Balance updated - USDT: {usdt_balance:.2f}, BTC: {btc_balance:.6f}")
+                        logger.info(f"Balance - USDT: ${usdt_balance:,.2f}, BTC: {btc_balance:.8f}")
                 except Exception as e:
                     logger.warning(f"Balance update failed: {e}")
 
             portfolio_value = usdt_balance + btc_balance * price + 1e-9
+            logger.info(f"Portfolio value: ${portfolio_value:,.2f}")
+            
             if portfolio_value < 1e-9:
                 cash_ratio = 0.0
             else:
@@ -320,35 +327,53 @@ def main_loop():
             # Use actual position size from tracker if available
             if tracker.has_position():
                 pos_ratio = tracker.position_size()
-                logger.debug(f"Using tracker position: {pos_ratio:.6f}")
+                logger.info(f"Tracker position: {pos_ratio:.8f} BTC")
             else:
                 pos_ratio = btc_balance
-                logger.debug(f"Using balance position: {pos_ratio:.6f}")
+                logger.info(f"Balance position: {pos_ratio:.8f} BTC")
 
             state = np.concatenate([window_norm, [cash_ratio, pos_ratio]]).astype(np.float32)
-
-            # DEBUG: Tampilkan state details
-            logger.debug(f"State shape: {state.shape}")
-            logger.debug(f"Cash ratio: {cash_ratio:.4f}, Position ratio: {pos_ratio:.6f}")
-            logger.debug(f"State last 5 values: {state[-7:]}")  # Tampilkan 5 nilai terakhir + 2 ratio
+            
+            # DEBUG: Show critical ratios
+            logger.info(f"Cash ratio: {cash_ratio:.4f} ({usdt_balance:,.2f}/{portfolio_value:,.2f})")
+            logger.info(f"Position ratio: {pos_ratio:.8f}")
+            
+            # Calculate moving averages for manual check
+            if len(window_norm) >= 20:
+                short_ma = np.mean(window_norm[-10:]) if len(window_norm) >= 10 else 1.0
+                long_ma = np.mean(window_norm[-20:]) if len(window_norm) >= 20 else 1.0
+                logger.info(f"MA Analysis - Short MA ({min(10, len(window_norm))}): {short_ma:.4f}, Long MA ({min(20, len(window_norm))}): {long_ma:.4f}")
+                logger.info(f"MA Comparison - Short vs Long: {short_ma:.4f} vs {long_ma:.4f}, Diff: {short_ma - long_ma:.4f}")
+                logger.info(f"Price vs Short MA: {window_norm[-1]:.4f} vs {short_ma:.4f}, Diff: {window_norm[-1] - short_ma:.4f}")
 
             # AI decision
             try:
                 raw_action = ensemble.decide(state)
-                logger.info(f"Raw AI decision: {raw_action} (type: {type(raw_action)})")
-
-                # DEBUG: Jika menggunakan RuleBased, tampilkan decision details
+                logger.info(f"Raw AI decision: {raw_action} (0=BUY, 1=HOLD, 2=SELL)")
+                
+                # Get detailed decision info if available
                 if ENABLE_RULE and len(ensemble_models) > 0:
                     for i, model in enumerate(ensemble_models):
+                        model_name = model.__class__.__name__
+                        logger.info(f"Checking model: {model_name}")
+                        
                         if hasattr(model, 'get_last_decision_info'):
                             info = model.get_last_decision_info()
                             if info:
-                                logger.info(f"Model {i} ({model.__class__.__name__}): {info}")
+                                logger.info(f"Model '{model_name}' decision details:")
+                                for key, value in info.items():
+                                    logger.info(f"  {key}: {value}")
+                        
+                        # Also check if model has any debug attributes
+                        if hasattr(model, 'debug_info'):
+                            logger.info(f"Model '{model_name}' debug: {model.debug_info}")
+                            
             except Exception as e:
                 logger.error(f"AI decision failed: {e}")
-                # Default to HOLD (1) on error
                 raw_action = 1
                 logger.info("Using default HOLD action due to AI error")
+
+            logger.info(f"=== END AI DEBUG ===")
 
             # =========================
             # RISK MANAGEMENT GATE
