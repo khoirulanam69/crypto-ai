@@ -152,6 +152,15 @@ def get_balance_with_retry(om, max_retries=3):
                 logger.error(f"Balance fetch failed after {max_retries} attempts: {e}")
     return None
 
+def convert_ai_signal_for_risk_engine(ai_signal):
+    """Convert AI signal (0,1,2) to risk engine probability (0-1)."""
+    if ai_signal == 0:  # BUY
+        return 0.8  # 80% confidence
+    elif ai_signal == 2:  # SELL  
+        return 0.2  # 20% confidence (bearish)
+    else:  # HOLD
+        return 0.5  # Neutral
+
 def main_loop():
     last_equity = None
     step_counter = 0
@@ -390,9 +399,13 @@ def main_loop():
 
             logger.debug(f"Equity: ${equity:.2f}, Has position: {tracker.has_position()}")
 
+            # Convert AI signal untuk risk engine
+            converted_signal = convert_ai_signal_for_risk_engine(raw_action)
+            logger.info(f"Signal conversion: AI={raw_action} → RiskEngine={converted_signal:.2f}")
+
             try:
                 risk_decision = risk_engine.evaluate(
-                    signal=raw_action,
+                    signal=converted_signal,  # INI YANG BENAR
                     candles=ohlcv,
                     equity=equity,
                     price=price,
@@ -401,7 +414,6 @@ def main_loop():
                 logger.debug(f"Risk decision details: {risk_decision}")
             except Exception as e:
                 logger.error(f"Risk engine evaluation failed: {e}")
-                # Default to HOLD on risk engine error
                 risk_decision = {"action": "HOLD", "size": 0}
 
             # =========================
